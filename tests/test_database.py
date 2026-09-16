@@ -21,6 +21,19 @@ writes. pytest's monkeypatch fixture automatically undoes the patch after
 each test, so there is no risk of one test's changes leaking into another,
 or into the real app.
 
+THIS ALSO FORCIBLY DISABLES THE TURSO CLOUD BACKEND FOR EVERY TEST: since
+database/db_setup.py added Turso (cloud) support, get_connection() checks
+Streamlit secrets FIRST and uses the cloud database whenever credentials
+are configured there -- which they now are, in .streamlit/secrets.toml,
+for the deployed app. Without an extra safeguard, simply having that file
+present on a developer's machine would make this ENTIRE test suite quietly
+start running against the real, shared, production Turso database instead
+of a disposable local file -- inserting deliberately-invalid rows into it
+on every test run. The fixture below monkeypatches
+database.db_setup._get_turso_credentials() to always return (None, None),
+which forces get_connection() down the local-SQLite path no matter what
+secrets exist on the machine running the tests.
+
 HOW TO RUN (from the project root):
     python -m pytest tests/test_database.py -v
 """
@@ -30,13 +43,16 @@ import sqlite3
 import pytest
 
 import config
+import database.db_setup as db_setup
 from database.db_setup import create_indexes, create_tables, get_connection
 
 
 @pytest.fixture
 def test_db(tmp_path, monkeypatch):
-    """A fresh, fully-constrained, empty test database for one test."""
+    """A fresh, fully-constrained, empty test database for one test --
+    never the real local database, and never the real Turso database."""
     monkeypatch.setattr(config, "DB_PATH", tmp_path / "test_student_data.db")
+    monkeypatch.setattr(db_setup, "_get_turso_credentials", lambda: (None, None))
 
     conn = get_connection()
     create_tables(conn)

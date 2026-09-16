@@ -65,32 +65,82 @@ def _quoted_list(values: tuple[str, ...]) -> str:
     return ", ".join(f"'{value}'" for value in values)
 
 
-def get_connection() -> sqlite3.Connection:
+def _get_turso_credentials() -> tuple[str | None, str | None]:
     """
-    Open a connection to the project's SQLite database file.
+    Read Turso (cloud database) credentials from Streamlit secrets, if
+    configured.
 
-    SQLite has foreign-key enforcement turned OFF by default, and this is
-    a setting stored on the CONNECTION, not saved inside the database file
-    itself -- so every single connection we open, anywhere in this project,
-    must run "PRAGMA foreign_keys = ON" or constraints like
-    "FOREIGN KEY (roll_no) REFERENCES students(roll_no)" will be silently
-    ignored. This function is the one place that does it, and later
-    modules (starting with db_manager.py) will reuse this exact function
-    instead of opening connections by hand.
+    Deliberately a SEPARATE function from get_connection(), rather than
+    inlined, for one specific reason: tests/test_database.py monkeypatches
+    THIS function directly to force (None, None), guaranteeing the test
+    suite always uses a local, throwaway SQLite file and never touches a
+    real Turso database -- even on a machine that has real Turso
+    credentials configured in .streamlit/secrets.toml for the deployed
+    app. Splitting this out is what makes that guarantee possible.
 
     Returns:
-        An open sqlite3.Connection with foreign key enforcement enabled.
+        (database_url, auth_token) if both are configured in
+        st.secrets, otherwise (None, None) -- which happens on any local
+        development machine or CI run without a .streamlit/secrets.toml,
+        and is not treated as an error, just "cloud mode isn't configured
+        here".
     """
-    # Make sure the database/ folder exists before sqlite3 tries to create
-    # the .db file inside it.
-    config.DATABASE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        import streamlit as st
+        return st.secrets.get("TURSO_DATABASE_URL"), st.secrets.get("TURSO_AUTH_TOKEN")
+    except Exception:
+        # Covers every way this can fail to matter here: no secrets.toml
+        # file at all, a secrets.toml missing these specific keys, or this
+        # code running completely outside any Streamlit context (plain
+        # scripts, pytest) where st.secrets may not even be usable.
+        return None, None
 
-    conn = sqlite3.connect(config.DB_PATH)
+
+def get_connection():
+    """
+    Open a connection to the project's database -- Turso (a SQLite-
+    compatible cloud database, via the `libsql` package) if credentials
+    are configured in Streamlit secrets, otherwise a local SQLite file
+    (config.DB_PATH) exactly as this function worked before Turso support
+    was added.
+
+    WHY TWO BACKENDS INSTEAD OF JUST SWITCHING TO TURSO EVERYWHERE: local
+    development and the 85-test pytest suite should never depend on
+    network access or risk writing throwaway/deliberately-invalid test
+    data into a real, possibly-shared cloud database. Falling back to
+    local SQLite whenever Turso credentials aren't configured (which is
+    the normal case for `pytest`, and for `python -m database.db_setup`
+    run by hand) keeps every test and every earlier verification script
+    in this project working completely unchanged.
+
+    SQLite (and libSQL, which is SQLite-compatible) has foreign-key
+    enforcement turned OFF by default, and this is a setting stored on the
+    CONNECTION, not saved inside the database itself -- so every
+    connection this function returns has "PRAGMA foreign_keys = ON" run on
+    it explicitly, regardless of which backend it is.
+
+    Returns:
+        An open connection (sqlite3.Connection, or libsql's Connection
+        when using Turso) with foreign key enforcement enabled. Both
+        expose the same query interface (.execute(), .commit(),
+        .rollback(), "?" placeholders) that the rest of this project uses.
+    """
+    turso_url, turso_token = _get_turso_credentials()
+
+    if turso_url and turso_token:
+        import libsql
+        conn = libsql.connect(database=turso_url, auth_token=turso_token)
+    else:
+        # Make sure the database/ folder exists before sqlite3 tries to
+        # create the .db file inside it.
+        config.DATABASE_DIR.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(config.DB_PATH)
+
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
-def create_tables(conn: sqlite3.Connection) -> None:
+def create_tables(conn) -> None:
     """
     Create every application table if it does not already exist.
 
@@ -100,6 +150,12 @@ def create_tables(conn: sqlite3.Connection) -> None:
     for readability, though SQLite itself does not require parent tables
     to exist before a child table is CREATEd -- foreign keys are only
     checked when data is inserted/updated, not when the table is defined.
+
+    Args:
+        conn: Whatever get_connection() returned -- a sqlite3.Connection
+            (local) or a libsql Connection (Turso). Not type-hinted to one
+            specific class since it accepts either; both expose the same
+            .cursor()/.execute()/.commit() interface this function uses.
 
     Raises:
         DatabaseError: if any CREATE TABLE statement fails.
@@ -338,13 +394,21 @@ def create_tables(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("All tables created successfully (or already existed).")
 
-    except sqlite3.Error as error:
+    except (sqlite3.Error, ValueError) as error:
+        # ValueError, alongside sqlite3's own exception hierarchy, because
+        # the `libsql` package (used for the Turso cloud backend -- see
+        # get_connection() above) raises a plain ValueError for every kind
+        # of database error, rather than sqlite3.IntegrityError/
+        # OperationalError/etc. -- confirmed directly against a real Turso
+        # database, not assumed. Scoped narrowly to this one try block
+        # (which only ever runs CREATE TABLE statements), so this does not
+        # risk masking an unrelated ValueError from somewhere else.
         conn.rollback()
         logger.error("Failed to create tables: %s", error)
         raise DatabaseError(f"Could not create database tables: {error}") from error
 
 
-def create_indexes(conn: sqlite3.Connection) -> None:
+def create_indexes(conn) -> None:
     """
     Create indexes on columns that will be searched or joined on often.
 
@@ -386,7 +450,9 @@ def create_indexes(conn: sqlite3.Connection) -> None:
         conn.commit()
         logger.info("All indexes created successfully (or already existed).")
 
-    except sqlite3.Error as error:
+    except (sqlite3.Error, ValueError) as error:
+        # See create_tables()'s comment above for why ValueError is caught
+        # here too.
         conn.rollback()
         logger.error("Failed to create indexes: %s", error)
         raise DatabaseError(f"Could not create database indexes: {error}") from error

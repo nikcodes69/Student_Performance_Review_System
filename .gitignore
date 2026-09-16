@@ -33,3 +33,8 @@ Thumbs.db
 # Editor/IDE settings
 .vscode/
 .idea/
+
+# Streamlit secrets (Turso database URL + auth token, and anything else
+# sensitive) -- NEVER commit this. Streamlit Community Cloud gets its own
+# copy of these values pasted into its web UI, not from this file.
+.streamlit/secrets.toml

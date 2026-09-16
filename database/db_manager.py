@@ -5,33 +5,50 @@ The runtime data-access layer: small, reusable helper functions that run
 SQL queries safely. Every module that needs to read or write the database
 from here on (auth.py, and from step 8 onward: students.py, subjects.py,
 marks.py, attendance.py, audit.py) calls THESE functions rather than
-opening its own sqlite3 connection or writing its own cursor.execute()
+opening its own database connection or writing its own cursor.execute()
 calls.
 
 LAYERING IN THIS PROJECT:
-    database/db_setup.py   -> defines the SCHEMA (tables, constraints).
-                               Run once, at setup time.
+    database/db_setup.py   -> defines the SCHEMA (tables, constraints),
+                               and get_connection(), which opens either a
+                               local SQLite file or a Turso cloud database
+                               depending on whether Streamlit secrets are
+                               configured (see that file for the full
+                               explanation).
     database/db_manager.py -> (this file) runs QUERIES at runtime, using
-                               the connection function db_setup.py already
-                               defined. Imported by business-logic modules.
+                               get_connection(). Imported by business-logic
+                               modules, which never touch a database
+                               connection directly.
     modules/*.py            -> business logic (e.g. "log a user in", "add
-                               a student") -- calls db_manager, never
-                               touches sqlite3 directly.
+                               a student") -- calls db_manager only.
 
 PARAMETERIZED QUERIES -- ENFORCED BY THIS FILE'S OWN DESIGN:
 Every function below takes the SQL text and its values as TWO SEPARATE
 arguments (query, params). This is not just a style choice: it is what
-makes parameterized queries possible in the first place. SQLite (via
-Python's sqlite3 module) replaces each "?" in the query string with the
-matching value from params, treating that value purely as DATA -- it can
-never be interpreted as part of the SQL command, no matter what characters
-it contains. This is what stops SQL injection: an attacker typing
-`' OR '1'='1` into a login box just becomes a literal (and useless)
-username to search for, not a change to the query's logic. Contrast this
-with database/db_setup.py, which builds its CREATE TABLE strings with
-f-strings -- that file only ever interpolates trusted constants from
-config.py, never a value that came from a user, which is why it is safe
-there but would NOT be safe here.
+makes parameterized queries possible in the first place. The database
+driver replaces each "?" in the query string with the matching value from
+params, treating that value purely as DATA -- it can never be interpreted
+as part of the SQL command, no matter what characters it contains. This is
+what stops SQL injection: an attacker typing `' OR '1'='1` into a login
+box just becomes a literal (and useless) username to search for, not a
+change to the query's logic. Contrast this with database/db_setup.py,
+which builds its CREATE TABLE strings with f-strings -- that file only
+ever interpolates trusted constants from config.py, never a value that
+came from a user, which is why it is safe there but would NOT be safe here.
+
+WHY RESULTS COME BACK AS PLAIN DICTS, NOT sqlite3.Row: the local SQLite
+backend supports `conn.row_factory = sqlite3.Row`, which lets calling code
+read a result by column name (row["username"]). The Turso cloud backend
+(the `libsql` package) does NOT support row_factory at all -- confirmed
+directly against a real Turso database, not assumed -- it only ever
+returns plain tuples. Rather than have calling code behave differently
+depending on which backend is active, fetch_one()/fetch_all() below
+convert every row into a plain dict themselves, using cursor.description
+(a standard part of the Python DB-API that both backends provide) to get
+each column's name. Every module in this project already either does
+dict(row) or reads row["column"] -- both work identically well on an
+already-plain dict, so this change required editing NO calling code
+anywhere else in the project.
 """
 
 import sqlite3
@@ -42,8 +59,26 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Both sqlite3 and libsql raise errors that should be treated as database
+# errors here -- sqlite3 raises its own well-known exception hierarchy
+# (sqlite3.Error and subclasses like IntegrityError), while libsql raises
+# a plain ValueError for every failure (constraint violations, syntax
+# errors, and everything else) -- confirmed empirically against a real
+# Turso database. Catching both, in exactly these four functions (which
+# only ever wrap actual database calls), lets this file behave the same
+# way regardless of which backend get_connection() decided to use.
+DATABASE_ERRORS = (sqlite3.Error, ValueError)
 
-def fetch_one(query: str, params: tuple = ()) -> sqlite3.Row | None:
+
+def _row_to_dict(cursor, row) -> dict:
+    """Convert one fetched row (a tuple, on both backends -- see module
+    docstring) into a plain dict, using cursor.description for column
+    names."""
+    columns = [column[0] for column in cursor.description]
+    return dict(zip(columns, row))
+
+
+def fetch_one(query: str, params: tuple = ()) -> dict | None:
     """
     Run a SELECT expected to match at most one row, and return it.
 
@@ -52,32 +87,29 @@ def fetch_one(query: str, params: tuple = ()) -> sqlite3.Row | None:
         params: The values to substitute for each "?", in order.
 
     Returns:
-        A sqlite3.Row (accessible like a dict, e.g. row["username"]) if a
-        matching row was found, otherwise None.
+        A plain dict (accessible like row["username"]) if a matching row
+        was found, otherwise None.
 
     Raises:
         DatabaseError: if the query fails to execute.
     """
     conn = get_connection()
-    # row_factory = sqlite3.Row lets calling code read columns by NAME
-    # (row["username"]) instead of by fragile numeric position (row[1]),
-    # which stays correct even if a column is added to the table later.
-    conn.row_factory = sqlite3.Row
 
     try:
         cursor = conn.execute(query, params)
-        return cursor.fetchone()
-    except sqlite3.Error as error:
+        row = cursor.fetchone()
+        return _row_to_dict(cursor, row) if row is not None else None
+    except DATABASE_ERRORS as error:
         logger.error("fetch_one failed for query %r: %s", query, error)
         raise DatabaseError(f"Database read failed: {error}") from error
     finally:
         # The connection is always closed, whether the query succeeded or
-        # raised -- otherwise a failed query could leave the .db file
-        # locked for the rest of the program's run.
+        # raised -- otherwise a failed query could leave the database
+        # connection open for the rest of the program's run.
         conn.close()
 
 
-def fetch_all(query: str, params: tuple = ()) -> list[sqlite3.Row]:
+def fetch_all(query: str, params: tuple = ()) -> list[dict]:
     """
     Run a SELECT and return every matching row.
 
@@ -86,18 +118,18 @@ def fetch_all(query: str, params: tuple = ()) -> list[sqlite3.Row]:
         params: The values to substitute for each "?", in order.
 
     Returns:
-        A list of sqlite3.Row objects (possibly empty, never None).
+        A list of plain dicts (possibly empty, never None).
 
     Raises:
         DatabaseError: if the query fails to execute.
     """
     conn = get_connection()
-    conn.row_factory = sqlite3.Row
 
     try:
         cursor = conn.execute(query, params)
-        return cursor.fetchall()
-    except sqlite3.Error as error:
+        rows = cursor.fetchall()
+        return [_row_to_dict(cursor, row) for row in rows]
+    except DATABASE_ERRORS as error:
         logger.error("fetch_all failed for query %r: %s", query, error)
         raise DatabaseError(f"Database read failed: {error}") from error
     finally:
@@ -114,9 +146,14 @@ def execute_write(query: str, params: tuple = ()) -> int:
 
     Returns:
         For an INSERT, the new row's auto-generated primary key
-        (cursor.lastrowid). For an UPDATE, the number of rows that were
-        changed (cursor.rowcount) -- callers can use this to detect "I
-        tried to update a record that doesn't exist" (rowcount == 0).
+        (cursor.lastrowid). For an UPDATE, cursor.rowcount -- NOTE: on the
+        Turso backend this number has been observed to not always match
+        the exact row count sqlite3 would report (a `libsql` package
+        quirk, confirmed empirically). No code in this project currently
+        depends on the exact numeric value of an UPDATE's rowcount for any
+        decision, only on lastrowid for INSERTs, which is correct on both
+        backends -- but this is worth knowing if a future feature ever
+        wants to check "did my update actually change a row?" precisely.
 
     Raises:
         DatabaseError: if the write fails. The transaction is rolled back
@@ -128,11 +165,12 @@ def execute_write(query: str, params: tuple = ()) -> int:
     (e.g. modules/auth.py's create_user() checks "does this username
     already exist?" with a fetch_one() BEFORE calling execute_write()).
     That check-first approach is easier to read and to unit-test than
-    parsing SQLite's error text after the fact. The database's own UNIQUE
-    constraint still fires underneath as a second, independent safety net
-    (see database/db_setup.py) in the rare case of two requests racing
-    each other -- this function will still raise DatabaseError if THAT
-    happens, it just isn't the primary way we expect duplicates to be caught.
+    parsing the database driver's error text after the fact. The
+    database's own UNIQUE constraint still fires underneath as a second,
+    independent safety net (see database/db_setup.py) in the rare case of
+    two requests racing each other -- this function will still raise
+    DatabaseError if THAT happens, it just isn't the primary way we expect
+    duplicates to be caught.
     """
     conn = get_connection()
 
@@ -140,7 +178,7 @@ def execute_write(query: str, params: tuple = ()) -> int:
         cursor = conn.execute(query, params)
         conn.commit()
         return cursor.lastrowid if cursor.lastrowid else cursor.rowcount
-    except sqlite3.Error as error:
+    except DATABASE_ERRORS as error:
         conn.rollback()
         logger.error("execute_write failed for query %r: %s", query, error)
         raise DatabaseError(f"Database write failed: {error}") from error
@@ -171,7 +209,9 @@ def execute_transaction(statements: list[tuple[str, tuple]]) -> list[int]:
 
     Returns:
         A list of results, one per statement, in the same order: for an
-        INSERT, that statement's new lastrowid; for an UPDATE, its rowcount.
+        INSERT, that statement's new lastrowid; for an UPDATE, its
+        rowcount (see execute_write()'s docstring for a note on Turso's
+        rowcount behaviour).
 
     Raises:
         DatabaseError: if any statement fails. Every statement already
@@ -187,7 +227,7 @@ def execute_transaction(statements: list[tuple[str, tuple]]) -> list[int]:
             results.append(cursor.lastrowid if cursor.lastrowid else cursor.rowcount)
         conn.commit()
         return results
-    except sqlite3.Error as error:
+    except DATABASE_ERRORS as error:
         conn.rollback()
         logger.error("execute_transaction failed: %s", error)
         raise DatabaseError(f"Database transaction failed: {error}") from error

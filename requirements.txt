@@ -21,6 +21,11 @@ joblib==1.6.0
 # --- Password hashing ---
 bcrypt==5.0.0
 
+# --- Cloud database (Turso/libSQL) -- used when TURSO_DATABASE_URL and
+# TURSO_AUTH_TOKEN are configured in Streamlit secrets; falls back to a
+# local SQLite file otherwise. See database/db_setup.py's get_connection().
+libsql==0.1.11
+
 # --- PDF report card generation ---
 reportlab==5.0.1
 
