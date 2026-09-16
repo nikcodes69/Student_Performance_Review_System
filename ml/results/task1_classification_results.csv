@@ -1,0 +1,5 @@
+model,accuracy,precision,recall,f1,roc_auc,cv_recall_mean,cv_recall_std
+Dummy (baseline),0.7889,0.0,0.0,0.0,0.5,0.0,0.0
+Logistic Regression,0.7222,0.4118,0.7368,0.5283,0.8147,0.7508,0.1121
+Decision Tree,0.7111,0.3871,0.6316,0.48,0.7357,0.6325,0.1338
+Random Forest,0.7778,0.4783,0.5789,0.5238,0.834,0.6975,0.1076

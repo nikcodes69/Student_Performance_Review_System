@@ -1,0 +1,32 @@
+# Student Performance Review & Prediction System
+# Tested against Python 3.13 (this machine did not have 3.11 installed;
+# these are the exact versions that installed cleanly via prebuilt wheels
+# on Python 3.13 -- see README for details).
+# Install with:  pip install -r requirements.txt
+
+# --- Web application framework ---
+streamlit==1.64.0
+
+# --- Data handling ---
+pandas==3.0.5
+numpy==2.5.3
+
+# --- Charts (analytics dashboard, ML result plots) ---
+plotly==7.1.0
+
+# --- Machine learning ---
+scikit-learn==1.9.1
+joblib==1.6.0
+
+# --- Password hashing ---
+bcrypt==5.0.0
+
+# --- PDF report card generation ---
+reportlab==5.0.1
+
+# --- Testing ---
+pytest==9.1.1
+
+# --- Notebook support (for ml/model_training.ipynb) ---
+notebook==7.6.2
+ipykernel==7.3.0

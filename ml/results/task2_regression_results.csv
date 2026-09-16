@@ -1,0 +1,3 @@
+model,r2,adjusted_r2,mae,rmse,cv_r2_mean,cv_r2_std
+Dummy (mean baseline),-0.0017,-0.0489,10.7233,13.6832,-0.0132,0.0166
+Linear Regression,0.6135,0.5953,7.1146,8.4995,0.5957,0.0885
