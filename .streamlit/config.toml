@@ -1,0 +1,18 @@
+# Streamlit theme configuration -- this is Streamlit's own, built-in
+# theming mechanism (no custom CSS/JS injection needed). Every widget
+# across every page in this app picks up these colors automatically.
+# Reference: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+
+[theme]
+base = "light"
+primaryColor = "#4F46E5"            # indigo -- buttons, active nav item, progress bars, links
+backgroundColor = "#FFFFFF"          # main page background
+secondaryBackgroundColor = "#F3F4F6" # sidebar background, input fields, cards
+textColor = "#111827"                # near-black, high contrast on white
+font = "sans serif"
+
+[server]
+# Streamlit's default is a reasonable size limit already; kept explicit
+# here since this app accepts file-free forms only (no uploads), so a
+# small limit is appropriate and intentional, not a missing setting.
+maxUploadSize = 5

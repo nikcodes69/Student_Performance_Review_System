@@ -129,6 +129,7 @@ def create_student(
     )
 
     execute_transaction([insert_statement, audit_statement])
+    list_students.clear()  # invalidate the cached list -- see list_students()'s docstring
     logger.info("Student '%s' created by user_id=%s.", roll_no, acting_user["user_id"])
     return roll_no
 
@@ -232,6 +233,7 @@ def update_student(
     )
 
     execute_transaction([update_statement, audit_statement])
+    list_students.clear()  # invalidate the cached list -- see list_students()'s docstring
     logger.info(
         "Student '%s' updated by user_id=%s. Fields changed: %s",
         roll_no, acting_user["user_id"], list(new_value.keys()),
@@ -270,6 +272,7 @@ def deactivate_student(roll_no: str, acting_user: dict) -> None:
     )
 
     execute_transaction([update_statement, audit_statement])
+    list_students.clear()  # invalidate the cached list -- see list_students()'s docstring
     logger.info("Student '%s' deactivated by user_id=%s.", roll_no, acting_user["user_id"])
 
 
@@ -305,6 +308,7 @@ def reactivate_student(roll_no: str, acting_user: dict) -> None:
     )
 
     execute_transaction([update_statement, audit_statement])
+    list_students.clear()  # invalidate the cached list -- see list_students()'s docstring
     logger.info("Student '%s' reactivated by user_id=%s.", roll_no, acting_user["user_id"])
 
 
@@ -344,6 +348,7 @@ def get_student(roll_no: str, include_inactive: bool = False) -> dict:
     return dict(row)
 
 
+@st.cache_data(ttl=60)
 def list_students(
     semester: int | None = None,
     branch: str | None = None,
@@ -351,6 +356,24 @@ def list_students(
 ) -> list[dict]:
     """
     Fetch multiple students, optionally filtered.
+
+    CACHED for 60 seconds: this function is called on nearly every page in
+    the app (as the source of a student picker dropdown, a data table, or
+    both), so without caching it would re-run this query on every single
+    click anywhere in the app -- Streamlit reruns the whole script on every
+    interaction. @st.cache_data keys its cache by this function's actual
+    argument values, so list_students(semester=3) and list_students() are
+    cached separately, exactly as they should be.
+
+    STAYING FRESH AFTER A WRITE: the 60-second TTL alone would mean a
+    newly-created student might not appear in a dropdown for up to a
+    minute -- unacceptable, since a Teacher creating a student usually
+    wants to immediately select them for marks entry. So every write
+    function below (create_student, update_student, deactivate_student,
+    reactivate_student) calls `list_students.clear()` immediately after a
+    successful change, wiping the cache instantly rather than waiting for
+    the TTL. The TTL is just a safety net in case some future write path
+    ever forgets to call .clear().
 
     Args:
         semester: If given, only students in this semester.

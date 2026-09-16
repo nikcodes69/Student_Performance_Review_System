@@ -73,9 +73,75 @@ PERCENTAGE_EXPR = (
 
 
 # ---------------------------------------------------------------------------
-# SUBJECT AVERAGES
+# DASHBOARD SUMMARY (app.py's home page)
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=30)
+def get_dashboard_summary() -> dict:
+    """
+    A handful of top-level counts and rates for the home page dashboard.
+
+    Deliberately kept to COUNT()/SUM()/AVG() aggregate queries only -- no
+    per-row Python loop, unlike get_grade_distribution() and
+    get_subject_difficulty_index() above, which need modules/grades.py's
+    classification logic and so cannot avoid one. A dashboard that loads
+    on every single login and page return trip should stay as cheap as
+    possible; a shorter 30-second TTL (vs. 60s elsewhere in this file)
+    reflects that this is the FIRST thing anyone sees, so it should lag
+    behind a fresh mark/attendance entry a little less than the deeper
+    analytics pages do.
+
+    Returns:
+        A dict: student_count, subject_count, marks_count, pass_rate
+        (percentage, or None if no marks exist yet), avg_attendance
+        (percentage, or None if no attendance exists yet).
+    """
+    student_count = fetch_all("SELECT COUNT(*) AS c FROM students WHERE is_active = 1")[0]["c"]
+    subject_count = fetch_all("SELECT COUNT(*) AS c FROM subjects WHERE is_active = 1")[0]["c"]
+    marks_count = fetch_all("SELECT COUNT(*) AS c FROM marks")[0]["c"]
+
+    pass_row = fetch_all(
+        f"SELECT "
+        f"SUM(CASE WHEN {PERCENTAGE_EXPR} >= ? THEN 1 ELSE 0 END) AS passed, "
+        f"COUNT(*) AS total "
+        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code",
+        (config.PASS_PERCENTAGE,),
+    )[0]
+    pass_rate = (
+        round(pass_row["passed"] / pass_row["total"] * 100, 1) if pass_row["total"] else None
+    )
+
+    attendance_row = fetch_all(
+        "SELECT AVG(classes_attended * 100.0 / classes_held) AS avg_pct "
+        "FROM attendance WHERE classes_held > 0"
+    )[0]
+    avg_attendance = round(attendance_row["avg_pct"], 1) if attendance_row["avg_pct"] is not None else None
+
+    return {
+        "student_count": student_count,
+        "subject_count": subject_count,
+        "marks_count": marks_count,
+        "pass_rate": pass_rate,
+        "avg_attendance": avg_attendance,
+    }
+
+
+# ---------------------------------------------------------------------------
+# SUBJECT AVERAGES
+# ---------------------------------------------------------------------------
+# Every DB-querying function in this file below is wrapped in
+# @st.cache_data(ttl=60): each involves a JOIN across two or three tables,
+# and several also loop over every row in Python to classify a grade (see
+# the module docstring's SQL-vs-grades.py section) -- genuinely more
+# expensive than a simple lookup. Unlike modules/students.py's
+# list_students() (cached WITH explicit .clear() calls on every write, so
+# a new student appears in pickers instantly), these analytics functions
+# use TTL-only caching with no manual invalidation: this is a read-only
+# dashboard, so a chart being up to 60 seconds behind the latest mark
+# entered is a reasonable, explainable trade-off for not re-running these
+# heavier queries on every single click anywhere in the app.
+
+@st.cache_data(ttl=60)
 def get_subject_averages(semester: int | None = None) -> list[dict]:
     """
     Average percentage and number of marks entries, per subject.
@@ -105,6 +171,7 @@ def get_subject_averages(semester: int | None = None) -> list[dict]:
 # STUDENT AVERAGES, TOP/BOTTOM PERFORMERS, PERFORMANCE TREND
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=60)
 def get_student_averages(semester: int | None = None) -> list[dict]:
     """
     Average percentage per student, across every subject they have marks
@@ -147,6 +214,7 @@ def get_bottom_performers(n: int = 5, semester: int | None = None) -> list[dict]
     return averages[:n]
 
 
+@st.cache_data(ttl=60)
 def get_student_performance_trend(roll_no: str) -> list[dict]:
     """
     One student's average percentage in EACH semester they have marks in,
@@ -174,6 +242,7 @@ def get_student_performance_trend(roll_no: str) -> list[dict]:
 # modules/grades.py, not SQL -- see module docstring)
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=60)
 def get_grade_distribution(semester: int | None = None) -> dict[str, int]:
     """
     Count how many marks entries fall into each letter grade.
@@ -211,6 +280,7 @@ def get_grade_distribution(semester: int | None = None) -> dict[str, int]:
     return distribution
 
 
+@st.cache_data(ttl=60)
 def get_subject_difficulty_index(semester: int | None = None) -> list[dict]:
     """
     Rank subjects by how many students failed them.
@@ -273,6 +343,7 @@ def get_subject_difficulty_index(semester: int | None = None) -> list[dict]:
 # ATTENDANCE-VS-MARKS CORRELATION
 # ---------------------------------------------------------------------------
 
+@st.cache_data(ttl=60)
 def get_attendance_marks_correlation(semester: int | None = None) -> tuple[list[dict], float | None]:
     """
     Pair up each (student, subject, semester)'s attendance percentage with

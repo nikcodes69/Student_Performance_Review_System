@@ -43,25 +43,56 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Page sections shown on the home dashboard below, grouped the same way
+# they're grouped in the sidebar -- (label, icon, roles allowed, one-line
+# description). Icons use Streamlit's built-in Material icon syntax
+# (":material/name:"), not emoji -- a real, consistent icon set rather
+# than a decorative flourish.
+HOME_SECTIONS = [
+    ("Students", ":material/group:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Manage student records"),
+    ("Subjects", ":material/menu_book:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Configure the curriculum"),
+    ("Marks Entry", ":material/edit_note:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Record internal/external/practical marks"),
+    ("Attendance", ":material/event_available:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Track classes held/attended"),
+    ("Analytics", ":material/monitoring:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Averages, trends, correlations"),
+    ("At-Risk Prediction", ":material/warning:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Who needs early support"),
+    ("Final Marks Prediction", ":material/query_stats:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Estimate a student's final percentage"),
+    ("Student Segmentation", ":material/scatter_plot:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Behavioural performance groups"),
+    ("Model Comparison", ":material/model_training:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Metrics behind every deployed model"),
+    ("Report Card", ":material/picture_as_pdf:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Downloadable PDF report card"),
+    ("Audit Log", ":material/history:", (config.ROLE_ADMIN,), "Full history of every change"),
+]
+
 
 def render_home_page() -> None:
-    """Landing page, visible to every logged-in role."""
+    """Landing dashboard, visible to every logged-in role."""
+    user = auth.get_current_user()
     st.title("Student Performance Review & Prediction System")
-    st.write("Use the sidebar to navigate. Available pages depend on your role:")
-    st.markdown(
-        "- **Students / Subjects / Marks Entry / Attendance** -- day-to-day "
-        "record keeping (Admin, Teacher)\n"
-        "- **Analytics** -- averages, trends, grade distribution, "
-        "attendance-vs-marks correlation, subject difficulty (Admin, Teacher)\n"
-        "- **At-Risk Prediction / Final Marks Prediction / Student Segmentation** "
-        "-- machine learning predictions for an individual student (Admin, Teacher)\n"
-        "- **Model Comparison** -- metrics and deployment justification for every "
-        "trained model (Admin, Teacher)\n"
-        "- **Report Card** -- downloadable PDF report card, optionally including "
-        "ML predictions (Admin, Teacher)\n"
-        "- **Audit Log** -- full history of every change made to academic records "
-        "(Admin only)"
+
+    summary = analytics.get_dashboard_summary()
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric(":material/group: Active Students", summary["student_count"])
+    metric_cols[1].metric(":material/menu_book: Active Subjects", summary["subject_count"])
+    metric_cols[2].metric(":material/edit_note: Marks Recorded", summary["marks_count"])
+    metric_cols[3].metric(
+        ":material/check_circle: Pass Rate",
+        f"{summary['pass_rate']}%" if summary["pass_rate"] is not None else "N/A",
     )
+    metric_cols[4].metric(
+        ":material/event_available: Avg. Attendance",
+        f"{summary['avg_attendance']}%" if summary["avg_attendance"] is not None else "N/A",
+    )
+
+    st.divider()
+    st.subheader("Available pages")
+
+    visible_sections = [s for s in HOME_SECTIONS if user["role"] in s[2]]
+    section_cols = st.columns(3)
+    for index, (label, icon, _roles, description) in enumerate(visible_sections):
+        with section_cols[index % 3]:
+            with st.container(border=True):
+                st.markdown(f"**{icon} {label}**")
+                st.caption(description)
 
 
 # Each entry maps a sidebar menu label to (roles allowed to see it, the
@@ -87,45 +118,57 @@ PAGES = {
     "Audit Log": ((config.ROLE_ADMIN,), audit.render_audit_log_page),
 }
 
+# Icon per sidebar entry, reusing HOME_SECTIONS' icon choices (plus Home's
+# own) so the same page is represented by the same icon everywhere in the
+# app -- looked up by st.sidebar.radio's format_func below, which only
+# changes how each option is DISPLAYED, not the underlying value used to
+# look up PAGES[choice].
+PAGE_ICONS = {"Home": ":material/home:"} | {label: icon for label, icon, _roles, _desc in HOME_SECTIONS}
+
 
 def render_login_form() -> None:
     """Show the login form and handle a submitted login attempt."""
-    st.title("Student Performance Review & Prediction System")
-    st.subheader("Log In")
+    # A centered, fixed-width column instead of a full-page-wide form --
+    # purely a layout choice (st.columns with unused side columns to
+    # center the middle one), no new widget behaviour.
+    _left, center, _right = st.columns([1, 1.2, 1])
+    with center:
+        st.title(":material/school: Student Performance System")
+        st.caption("Sign in to continue")
 
-    # st.form groups the two inputs and the button together so the page
-    # only reruns (and only tries to log in) once, when "Log In" is
-    # clicked -- not on every single keystroke in the username/password
-    # boxes, which is what would happen without a form.
-    with st.form("login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Log In")
+        # st.form groups the two inputs and the button together so the
+        # page only reruns (and only tries to log in) once, when "Log In"
+        # is clicked -- not on every single keystroke in the username/
+        # password boxes, which is what would happen without a form.
+        with st.form("login_form"):
+            username = st.text_input("Username", placeholder="e.g. admin")
+            password = st.text_input("Password", type="password", placeholder="••••••••")
+            submitted = st.form_submit_button("Log In", use_container_width=True, type="primary")
 
-    if submitted:
-        try:
-            user = auth.login(username, password)
-            st.success(f"Welcome, {user['username']} ({user['role']}).")
-            # st.rerun() immediately restarts the script from the top.
-            # This matters because is_session_valid() (checked in main(),
-            # below) needs to run again to notice the session we JUST
-            # created above -- without this, the user would still see the
-            # login form for one extra click.
-            st.rerun()
-        except (ValidationError, AuthenticationError) as error:
-            # Both exception types produce a message written specifically
-            # to be shown to a human (see utils/validators.py and
-            # modules/auth.py) -- so str(error) is safe and appropriate
-            # to display directly here.
-            st.error(str(error))
+        if submitted:
+            try:
+                user = auth.login(username, password)
+                st.success(f"Welcome, {user['username']} ({user['role']}).")
+                # st.rerun() immediately restarts the script from the top.
+                # This matters because is_session_valid() (checked in
+                # main(), below) needs to run again to notice the session
+                # we JUST created above -- without this, the user would
+                # still see the login form for one extra click.
+                st.rerun()
+            except (ValidationError, AuthenticationError) as error:
+                # Both exception types produce a message written
+                # specifically to be shown to a human (see
+                # utils/validators.py and modules/auth.py) -- so
+                # str(error) is safe and appropriate to display directly.
+                st.error(str(error))
 
 
 def render_authenticated_view(user: dict) -> None:
     """Show the sidebar menu and whichever page the user picked."""
-    st.sidebar.write(f"Logged in as **{user['username']}**")
-    st.sidebar.write(f"Role: **{user['role']}**")
+    st.sidebar.markdown(f"### :material/account_circle: {user['username']}")
+    st.sidebar.caption(f"Role: {user['role'].capitalize()}")
 
-    if st.sidebar.button("Log Out"):
+    if st.sidebar.button("Log Out", icon=":material/logout:", use_container_width=True):
         auth.logout()
         st.rerun()
 
@@ -135,7 +178,14 @@ def render_authenticated_view(user: dict) -> None:
     available_pages = [
         label for label, (roles, _render_fn) in PAGES.items() if user["role"] in roles
     ]
-    choice = st.sidebar.radio("Navigate", available_pages)
+    # format_func only changes how each option is DISPLAYED (prefixing its
+    # icon) -- the value st.sidebar.radio actually returns, and that
+    # `choice` gets used to look up PAGES[choice] below, is still the
+    # plain label string.
+    choice = st.sidebar.radio(
+        "Navigate", available_pages,
+        format_func=lambda label: f"{PAGE_ICONS.get(label, '')} {label}".strip(),
+    )
 
     _roles, render_fn = PAGES[choice]
 

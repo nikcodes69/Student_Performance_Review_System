@@ -51,7 +51,7 @@ import config
 from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth, students, subjects
 from modules.audit import build_audit_entry
-from modules.grades import evaluate_subject_marks
+from modules.grades import calculate_sgpa, evaluate_subject_marks
 from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.validators import (
@@ -377,6 +377,45 @@ def _with_evaluation(row: dict) -> dict:
     )
     row.update(evaluation)
     return row
+
+
+def compute_sgpa_for_marks(subject_marks: list[dict]) -> float | None:
+    """
+    Compute SGPA from a list of already-fetched marks rows (each must
+    have "subject_code" and "grade_point" -- exactly what
+    list_marks_for_student() returns), by looking up each subject's
+    credits and calling modules.grades.calculate_sgpa() -- the same grade
+    engine every other part of this app uses.
+
+    Centralised here, rather than left as three near-identical private
+    copies: modules/ml_predictions.py (computing a student's PREVIOUS
+    semester SGPA as an ML feature), utils/pdf_generator.py (the report
+    card's SGPA line), and modules/student_portal.py (a student's own
+    SGPA) all need exactly this same "marks rows -> SGPA" computation.
+    modules/marks.py is the natural shared home for it: it already
+    imports both modules.subjects (for credits) and modules.grades (for
+    the SGPA formula itself), which the other three files would otherwise
+    each need to import solely for this one calculation.
+
+    Args:
+        subject_marks: Marks rows for ONE semester (mixing semesters
+            would credit-weight subjects from different semesters
+            together, which is not what SGPA means).
+
+    Returns:
+        The SGPA, or None if subject_marks is empty.
+    """
+    if not subject_marks:
+        return None
+
+    subject_results = [
+        {
+            "credits": subjects.get_subject(row["subject_code"], include_inactive=True)["credits"],
+            "grade_point": row["grade_point"],
+        }
+        for row in subject_marks
+    ]
+    return calculate_sgpa(subject_results)
 
 
 # ---------------------------------------------------------------------------

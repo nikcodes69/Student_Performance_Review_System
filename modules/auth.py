@@ -19,18 +19,53 @@ This file is split into two clearly separate halves:
      script. Streamlit re-runs app.py from top to bottom every time a
      user clicks anything, so without session_state, a user would be
      logged out by their own next click.
+
+======================================================================
+WHO CAN CREATE AN ACCOUNT, AND HOW -- A DELIBERATE, ASYMMETRIC DESIGN
+======================================================================
+This app does NOT offer one universal "sign up" form for every role.
+That would mean any visitor to a publicly deployed instance of this app
+could grant themselves an Admin account -- full access to every
+student's records, the audit log, everything. Instead:
+
+  - STUDENT: self-service, via self_register_student() below, but only
+    to CLAIM A LOGIN for a roll_no that an Admin/Teacher already entered
+    into the students table. A student cannot invent a new student record
+    of themselves through signup -- academic records are only ever
+    created by staff (modules/students.py). To prove the person signing
+    up really is that student, self_register_student() also requires the
+    email address already on file for that roll_no to match. This is
+    deliberately lightweight (no emailed confirmation link, no OTP -- out
+    of scope for a project this size) but it does mean a random visitor
+    cannot claim an arbitrary roll_no just by guessing a number; they
+    would also need to know the exact email the institution has on record.
+
+  - TEACHER and ADMIN: never self-service. create_user() (below) is only
+    ever called two ways: by an existing Admin, through
+    render_user_management_page() at the bottom of this file, or by
+    ensure_default_admin_exists()'s one-time bootstrap script
+    (`python -m modules.auth`) when NO admin exists at all yet. There is
+    no page anywhere in this app where a visitor can choose "Teacher" or
+    "Admin" for themselves.
 """
 
 from datetime import datetime, timedelta
 
 import bcrypt
+import pandas as pd
 import streamlit as st
 
 import config
-from database.db_manager import execute_write, fetch_one
-from utils.exceptions import AuthenticationError, AuthorizationError, DuplicateRecordError
+from database.db_manager import execute_write, fetch_all, fetch_one
+from utils.exceptions import (
+    AuthenticationError,
+    AuthorizationError,
+    DuplicateRecordError,
+    RecordNotFoundError,
+    ValidationError,
+)
 from utils.logger import get_logger
-from utils.validators import validate_password, validate_role, validate_username
+from utils.validators import validate_email, validate_password, validate_role, validate_roll_no, validate_username
 
 logger = get_logger(__name__)
 
@@ -133,6 +168,60 @@ def create_user(username: str, password: str, role: str) -> int:
     # or its hash -- logs are written to a plain text file
     # (logs/app.log) that should never contain secrets.
     logger.info("Created user '%s' with role '%s' (user_id=%s).", username, role, user_id)
+    return user_id
+
+
+def self_register_student(roll_no: str, email: str, password: str) -> int:
+    """
+    Let a student create their OWN login, for a student record an
+    Admin/Teacher already created. See the module docstring's "WHO CAN
+    CREATE AN ACCOUNT" section for the full reasoning -- this is
+    deliberately the ONLY self-service signup path in the whole app.
+
+    The student's username becomes their roll_no, matching the
+    convention established in database/db_setup.py's students table
+    (a Student-role user's username IS their roll_no) -- there is no
+    separate "choose a username" step.
+
+    WHY THIS IS A LAZY IMPORT (modules.students imported inside this
+    function, not at the top of the file): modules/students.py imports
+    `from modules import auth` (for check_permission()), so importing
+    modules.students at the TOP of this file would create a circular
+    import -- auth -> students -> auth, which Python cannot resolve.
+    Importing it here instead, inside the function body, works because by
+    the time this function is actually CALLED, both modules have already
+    finished loading.
+
+    Args:
+        roll_no: The student's roll number -- must already exist as an
+            active student record.
+        email: The email address already on file for that student, used
+            as a lightweight proof of identity.
+        password: The desired plaintext password.
+
+    Returns:
+        The new user account's user_id.
+
+    Raises:
+        RecordNotFoundError: if no active student exists with this roll_no.
+        ValidationError: if the email does not match the one on file, or
+            the password fails validation.
+        DuplicateRecordError: if a login already exists for this roll_no.
+    """
+    from modules.students import get_student  # see docstring above
+
+    roll_no = validate_roll_no(roll_no)
+    student = get_student(roll_no)  # raises RecordNotFoundError if missing/inactive
+
+    email = validate_email(email)
+    if email != student["email"]:
+        raise ValidationError(
+            "That email address does not match our record for this roll number. "
+            "Contact an administrator if you believe this is an error."
+        )
+
+    user_id = create_user(username=roll_no, password=password, role=config.ROLE_STUDENT)
+    logger.info("Student '%s' self-registered a login (user_id=%s).", roll_no, user_id)
     return user_id
 
 
@@ -246,6 +335,110 @@ def ensure_default_admin_exists() -> None:
         "This password is publicly visible in config.py -- change it immediately.",
         config.DEFAULT_ADMIN_USERNAME,
     )
+
+
+def list_users() -> list[dict]:
+    """
+    Fetch every user account (Admin, Teacher, and Student logins alike).
+
+    Not permission-gated itself -- consistent with every other list_*
+    function in this project (see modules/students.py's module docstring
+    for the full reasoning): the real gate is
+    render_user_management_page() below calling require_role(ROLE_ADMIN)
+    before this is ever called. Deliberately excludes password_hash from
+    the SELECT entirely, not just from what's displayed -- a hash that is
+    never fetched can never accidentally be shown or logged.
+
+    Returns:
+        A list of dicts: user_id, username, role, is_active, created_at,
+        last_login. Ordered by username.
+    """
+    return fetch_all(
+        "SELECT user_id, username, role, is_active, created_at, last_login "
+        "FROM users ORDER BY username"
+    )
+
+
+def deactivate_user(user_id: int, acting_user: dict) -> None:
+    """
+    Soft-delete a user account (disable login) -- never hard-deleted,
+    consistent with every other table in this project.
+
+    Args:
+        user_id: The account to deactivate.
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if user_id does not exist.
+        ValidationError: if the account is already inactive, or
+            acting_user is trying to deactivate their own account (an
+            Admin locking themselves out would have no way back in short
+            of another Admin existing -- simplest to just disallow it).
+    """
+    from modules.audit import build_audit_entry  # see self_register_student()'s docstring for why this is a lazy import
+    from database.db_manager import execute_transaction
+
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+
+    existing = fetch_one(
+        "SELECT user_id, username, is_active FROM users WHERE user_id = ?", (user_id,)
+    )
+    if existing is None:
+        raise RecordNotFoundError(f"No user found with user_id {user_id}.")
+    if not existing["is_active"]:
+        raise ValidationError(f"User '{existing['username']}' is already inactive.")
+    if user_id == acting_user["user_id"]:
+        raise ValidationError("You cannot deactivate your own account.")
+
+    update_statement = (
+        "UPDATE users SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+        (user_id,),
+    )
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_SOFT_DELETE, "users", str(user_id),
+        old_value={"is_active": 1}, new_value={"is_active": 0},
+    )
+    execute_transaction([update_statement, audit_statement])
+    logger.info("User '%s' (user_id=%s) deactivated by user_id=%s.", existing["username"], user_id, acting_user["user_id"])
+
+
+def reactivate_user(user_id: int, acting_user: dict) -> None:
+    """
+    Reverse a soft-delete: sets is_active back to 1.
+
+    Args:
+        user_id: The account to reactivate.
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if user_id does not exist.
+        ValidationError: if the account is already active.
+    """
+    from modules.audit import build_audit_entry
+    from database.db_manager import execute_transaction
+
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+
+    existing = fetch_one(
+        "SELECT user_id, username, is_active FROM users WHERE user_id = ?", (user_id,)
+    )
+    if existing is None:
+        raise RecordNotFoundError(f"No user found with user_id {user_id}.")
+    if existing["is_active"]:
+        raise ValidationError(f"User '{existing['username']}' is already active.")
+
+    update_statement = (
+        "UPDATE users SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+        (user_id,),
+    )
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "users", str(user_id),
+        old_value={"is_active": 0}, new_value={"is_active": 1},
+    )
+    execute_transaction([update_statement, audit_statement])
+    logger.info("User '%s' (user_id=%s) reactivated by user_id=%s.", existing["username"], user_id, acting_user["user_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +571,85 @@ def require_role(*allowed_roles: str) -> dict:
         st.stop()
 
     return user
+
+
+def render_user_management_page() -> None:
+    """
+    Streamlit page: Admin creates Teacher/Admin/Student login accounts by
+    hand, and can deactivate/reactivate existing ones. Admin-only -- this
+    is deliberately the ONLY way a Teacher or Admin account ever comes
+    into existence (besides the one-time bootstrap script) -- see the
+    module docstring's "WHO CAN CREATE AN ACCOUNT" section.
+    """
+    current_user = require_role(config.ROLE_ADMIN)
+
+    st.title("User Management")
+
+    st.subheader("Create a new account")
+    st.caption(
+        "Use this to create Teacher and Admin accounts. Students should "
+        "normally use the Sign Up tab on the login page themselves -- see "
+        "there first if you're creating a login for an existing student."
+    )
+    with st.form("create_user_form", clear_on_submit=True):
+        new_username = st.text_input("Username")
+        new_password = st.text_input("Password", type="password")
+        new_role = st.selectbox("Role", options=config.VALID_ROLES)
+        create_submitted = st.form_submit_button("Create Account")
+
+    if create_submitted:
+        try:
+            create_user(new_username, new_password, new_role)
+            st.success(f"Account '{new_username}' created with role '{new_role}'.")
+            st.rerun()
+        except (ValidationError, DuplicateRecordError) as error:
+            st.error(str(error))
+
+    st.divider()
+    st.subheader("Existing accounts")
+
+    users = list_users()
+    if not users:
+        st.info("No user accounts found.")
+        return
+
+    display_rows = [
+        {
+            "Username": u["username"],
+            "Role": u["role"],
+            "Active": "Yes" if u["is_active"] else "No",
+            "Created": u["created_at"],
+            "Last Login": u["last_login"] or "Never",
+        }
+        for u in users
+    ]
+    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+    st.subheader("Deactivate / reactivate an account")
+    username_choice = st.selectbox("Select an account", options=[u["username"] for u in users])
+    selected_user = next(u for u in users if u["username"] == username_choice)
+
+    deactivate_col, reactivate_col = st.columns(2)
+    with deactivate_col:
+        is_self = selected_user["user_id"] == current_user["user_id"]
+        if selected_user["is_active"] and st.button(
+            "Deactivate this account", disabled=is_self,
+            help="You cannot deactivate your own account." if is_self else None,
+        ):
+            try:
+                deactivate_user(selected_user["user_id"], current_user)
+                st.success(f"'{username_choice}' deactivated.")
+                st.rerun()
+            except ValidationError as error:
+                st.error(str(error))
+    with reactivate_col:
+        if not selected_user["is_active"] and st.button("Reactivate this account"):
+            try:
+                reactivate_user(selected_user["user_id"], current_user)
+                st.success(f"'{username_choice}' reactivated.")
+                st.rerun()
+            except ValidationError as error:
+                st.error(str(error))
 
 
 if __name__ == "__main__":

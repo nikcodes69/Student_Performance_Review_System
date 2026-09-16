@@ -103,6 +103,7 @@ def create_subject(
     )
 
     execute_transaction([insert_statement, audit_statement])
+    list_subjects.clear()  # invalidate the cached list -- see list_subjects()'s docstring
     logger.info("Subject '%s' created by user_id=%s.", subject_code, acting_user["user_id"])
     return subject_code
 
@@ -207,6 +208,7 @@ def update_subject(
     )
 
     execute_transaction([update_statement, audit_statement])
+    list_subjects.clear()  # invalidate the cached list -- see list_subjects()'s docstring
     logger.info(
         "Subject '%s' updated by user_id=%s. Fields changed: %s",
         subject_code, acting_user["user_id"], list(new_value.keys()),
@@ -243,6 +245,7 @@ def deactivate_subject(subject_code: str, acting_user: dict) -> None:
     )
 
     execute_transaction([update_statement, audit_statement])
+    list_subjects.clear()  # invalidate the cached list -- see list_subjects()'s docstring
     logger.info("Subject '%s' deactivated by user_id=%s.", subject_code, acting_user["user_id"])
 
 
@@ -276,6 +279,7 @@ def reactivate_subject(subject_code: str, acting_user: dict) -> None:
     )
 
     execute_transaction([update_statement, audit_statement])
+    list_subjects.clear()  # invalidate the cached list -- see list_subjects()'s docstring
     logger.info("Subject '%s' reactivated by user_id=%s.", subject_code, acting_user["user_id"])
 
 
@@ -313,9 +317,16 @@ def get_subject(subject_code: str, include_inactive: bool = False) -> dict:
     return dict(row)
 
 
+@st.cache_data(ttl=60)
 def list_subjects(semester: int | None = None, include_inactive: bool = False) -> list[dict]:
     """
     Fetch multiple subjects, optionally filtered by semester.
+
+    CACHED for 60 seconds, with every write function below calling
+    list_subjects.clear() immediately on a successful change -- see
+    modules/students.py's list_students() docstring for the full
+    reasoning (this function is used across just as many pages: Subjects,
+    Marks Entry, Attendance, ML predictions, Report Card).
 
     Args:
         semester: If given, only subjects in this semester.
