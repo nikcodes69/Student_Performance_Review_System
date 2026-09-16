@@ -1,0 +1,60 @@
+{
+  "task": "final_marks_regression",
+  "algorithm": "LinearRegression",
+  "version": "1.0",
+  "training_date": "2026-09-16T09:08:55.771585+00:00",
+  "random_state": 42,
+  "features": [
+    "internal_pct",
+    "attendance_pct",
+    "assignments_submitted",
+    "practical_pct"
+  ],
+  "target": "final_percentage",
+  "requires_scaling": false,
+  "hyperparameters": {
+    "copy_X": true,
+    "fit_intercept": true,
+    "n_jobs": null,
+    "positive": false,
+    "tol": 1e-06
+  },
+  "equation": {
+    "intercept": 1.38,
+    "coefficients": {
+      "internal_pct": 0.3367,
+      "attendance_pct": 0.186,
+      "assignments_submitted": 0.9426,
+      "practical_pct": 0.274
+    }
+  },
+  "metrics": {
+    "model": "Linear Regression",
+    "r2": 0.6135,
+    "adjusted_r2": 0.5953,
+    "mae": 7.1146,
+    "rmse": 8.4995,
+    "cv_r2_mean": 0.5957,
+    "cv_r2_std": 0.0885
+  },
+  "all_candidates_compared": [
+    {
+      "model": "Dummy (mean baseline)",
+      "r2": -0.0017,
+      "adjusted_r2": -0.0489,
+      "mae": 10.7233,
+      "rmse": 13.6832,
+      "cv_r2_mean": -0.0132,
+      "cv_r2_std": 0.0166
+    },
+    {
+      "model": "Linear Regression",
+      "r2": 0.6135,
+      "adjusted_r2": 0.5953,
+      "mae": 7.1146,
+      "rmse": 8.4995,
+      "cv_r2_mean": 0.5957,
+      "cv_r2_std": 0.0885
+    }
+  ]
+}

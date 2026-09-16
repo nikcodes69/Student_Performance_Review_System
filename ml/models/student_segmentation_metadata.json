@@ -1,0 +1,77 @@
+{
+  "task": "student_segmentation",
+  "algorithm": "KMeans",
+  "version": "1.0",
+  "training_date": "2026-09-16T09:08:56.190668+00:00",
+  "random_state": 42,
+  "features": [
+    "average_marks",
+    "attendance_pct",
+    "consistency",
+    "improvement_rate"
+  ],
+  "requires_scaling": true,
+  "k": 4,
+  "k_selection": {
+    "silhouette_by_k": {
+      "2": 0.2372,
+      "3": 0.2231,
+      "4": 0.2156,
+      "5": 0.2128,
+      "6": 0.2071,
+      "7": 0.215,
+      "8": 0.1986
+    },
+    "inertia_by_k": {
+      "2": 1314.7,
+      "3": 1101.64,
+      "4": 937.47,
+      "5": 830.06,
+      "6": 757.49,
+      "7": 695.5,
+      "8": 655.11
+    },
+    "chosen_k_silhouette": 0.2156,
+    "note": "silhouette peaks at k=2, but k=4 was chosen for practical segment usefulness -- see notebook markdown."
+  },
+  "pca_explained_variance_ratio_2d": [
+    0.4167,
+    0.2547
+  ],
+  "cluster_names": {
+    "1": "Needs Intervention",
+    "2": "Improving Students",
+    "3": "Inconsistent Performers",
+    "0": "Consistent High Performers"
+  },
+  "cluster_centroids": {
+    "0": {
+      "average_marks": 62.08,
+      "attendance_pct": 82.96,
+      "consistency": 5.88,
+      "improvement_rate": -3.6,
+      "student_count": 125
+    },
+    "1": {
+      "average_marks": 38.29,
+      "attendance_pct": 58.48,
+      "consistency": 8.62,
+      "improvement_rate": -14.74,
+      "student_count": 115
+    },
+    "2": {
+      "average_marks": 47.8,
+      "attendance_pct": 62.47,
+      "consistency": 6.05,
+      "improvement_rate": 11.0,
+      "student_count": 115
+    },
+    "3": {
+      "average_marks": 53.17,
+      "attendance_pct": 73.12,
+      "consistency": 13.97,
+      "improvement_rate": -0.06,
+      "student_count": 95
+    }
+  }
+}
