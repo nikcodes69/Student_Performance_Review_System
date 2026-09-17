@@ -33,6 +33,7 @@ import pytest
 from utils.exceptions import ValidationError
 from utils.validators import (
     validate_admission_year,
+    validate_assignment_values,
     validate_attendance_values,
     validate_audit_action,
     validate_branch,
@@ -376,6 +377,30 @@ def test_validate_attendance_values_rejects_attended_greater_than_held():
 def test_validate_attendance_values_rejects_negative_held():
     with pytest.raises(ValidationError):
         validate_attendance_values(classes_held=-1, classes_attended=0)
+
+
+# ---------------------------------------------------------------------------
+# validate_assignment_values
+# ---------------------------------------------------------------------------
+
+def test_validate_assignment_values_accepts_valid_pair():
+    # Should not raise.
+    validate_assignment_values(total_assigned=8, submitted=6)
+
+
+def test_validate_assignment_values_rejects_submitted_greater_than_total():
+    with pytest.raises(ValidationError):
+        validate_assignment_values(total_assigned=8, submitted=9)
+
+
+def test_validate_assignment_values_rejects_negative_total():
+    with pytest.raises(ValidationError):
+        validate_assignment_values(total_assigned=-1, submitted=0)
+
+
+def test_validate_assignment_values_rejects_negative_submitted():
+    with pytest.raises(ValidationError):
+        validate_assignment_values(total_assigned=5, submitted=-1)
 
 
 # ---------------------------------------------------------------------------

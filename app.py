@@ -36,7 +36,7 @@ safe message.
 import streamlit as st
 
 import config
-from modules import analytics, attendance, audit, auth, ml_predictions, marks, student_portal, students, subjects
+from modules import analytics, assignments, attendance, audit, auth, ml_predictions, marks, student_portal, students, subjects
 from utils.pdf_generator import render_report_card_page
 from utils.exceptions import (
     AppError,
@@ -59,6 +59,7 @@ HOME_SECTIONS = [
     ("Subjects", ":material/menu_book:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Configure the curriculum"),
     ("Marks Entry", ":material/edit_note:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Record internal/external/practical marks"),
     ("Attendance", ":material/event_available:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Track classes held/attended"),
+    ("Assignments", ":material/assignment_turned_in:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Track assignment submissions"),
     ("Analytics", ":material/monitoring:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Averages, trends, correlations"),
     ("At-Risk Prediction", ":material/warning:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Who needs early support"),
     ("Final Marks Prediction", ":material/query_stats:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Estimate a student's final percentage"),
@@ -122,6 +123,7 @@ PAGES = {
     "Subjects": ((config.ROLE_ADMIN, config.ROLE_TEACHER), subjects.render_subjects_page),
     "Marks Entry": ((config.ROLE_ADMIN, config.ROLE_TEACHER), marks.render_marks_page),
     "Attendance": ((config.ROLE_ADMIN, config.ROLE_TEACHER), attendance.render_attendance_page),
+    "Assignments": ((config.ROLE_ADMIN, config.ROLE_TEACHER), assignments.render_assignments_page),
     "Analytics": ((config.ROLE_ADMIN, config.ROLE_TEACHER), analytics.render_analytics_page),
     "At-Risk Prediction": ((config.ROLE_ADMIN, config.ROLE_TEACHER), ml_predictions.render_at_risk_page),
     "Final Marks Prediction": ((config.ROLE_ADMIN, config.ROLE_TEACHER), ml_predictions.render_final_marks_page),

@@ -365,40 +365,52 @@ def render_attendance_page() -> None:
         st.info(f"No active students found in semester {semester_value}.")
         return
 
-    # NOTE: Streamlit forms only rerun when submitted, not on every
-    # keystroke -- so "Classes Attended" cannot dynamically cap itself to
-    # whatever "Classes Held" currently holds within the same form. The
-    # UI therefore does not enforce attended <= held live; the authoritative
-    # check happens server-side, in validate_attendance_values(), when the
-    # form is submitted below (the same defense-in-depth principle used
-    # throughout this project: the UI is a convenience, not the real gate).
-    with st.form("attendance_entry_form"):
-        entered_values = {}
-        for student in class_students:
-            existing_entry = get_attendance_entry(
-                student["roll_no"], selected_subject["subject_code"], semester_value
+    # THESE ARE DELIBERATELY *NOT* WRAPPED IN st.form(). A form only
+    # reruns the script when its submit button is clicked, not on every
+    # keystroke -- which meant "Classes Attended" could not dynamically
+    # cap itself to whatever "Classes Held" currently holds (this was a
+    # known, explicitly documented limitation of the earlier version of
+    # this page). Using plain widgets instead means every change reruns
+    # the script immediately, so max_value=held_input below is always the
+    # CURRENT value the user just typed for that same student -- making it
+    # physically impossible for the "Classes Attended" widget to accept a
+    # number greater than "Classes Held", rather than accepting it and
+    # only rejecting it after "Save All" is clicked. The trade-off is more
+    # reruns while filling the form in, which our caching (see
+    # modules/students.py's list_students()) keeps cheap.
+    entered_values = {}
+    for student in class_students:
+        existing_entry = get_attendance_entry(
+            student["roll_no"], selected_subject["subject_code"], semester_value
+        )
+        st.markdown(f"**{student['roll_no']} — {student['name']}**")
+        held_col, attended_col = st.columns(2)
+        with held_col:
+            held_input = st.number_input(
+                "Classes Held", min_value=0,
+                value=existing_entry["classes_held"] if existing_entry else 0,
+                key=f"held_{student['roll_no']}",
             )
-            st.markdown(f"**{student['roll_no']} — {student['name']}**")
-            held_col, attended_col = st.columns(2)
-            with held_col:
-                held_input = st.number_input(
-                    "Classes Held", min_value=0,
-                    value=existing_entry["classes_held"] if existing_entry else 0,
-                    key=f"held_{student['roll_no']}",
-                )
-            with attended_col:
-                attended_input = st.number_input(
-                    "Classes Attended", min_value=0,
-                    value=existing_entry["classes_attended"] if existing_entry else 0,
-                    key=f"attended_{student['roll_no']}",
-                )
-            entered_values[student["roll_no"]] = {
-                "classes_held": int(held_input),
-                "classes_attended": int(attended_input),
-                "existing": existing_entry,
-            }
+        with attended_col:
+            # max_value is set to the CURRENT held_input value from above
+            # -- this is the live constraint described in the comment
+            # above. validate_attendance_values() in update_attendance()/
+            # record_attendance() still enforces the same rule server-side
+            # too (the UI constraint is a convenience, never the only gate
+            # -- the same defense-in-depth principle used throughout this
+            # project).
+            attended_input = st.number_input(
+                "Classes Attended", min_value=0, max_value=int(held_input),
+                value=min(existing_entry["classes_attended"], int(held_input)) if existing_entry else 0,
+                key=f"attended_{student['roll_no']}",
+            )
+        entered_values[student["roll_no"]] = {
+            "classes_held": int(held_input),
+            "classes_attended": int(attended_input),
+            "existing": existing_entry,
+        }
 
-        save_submitted = st.form_submit_button("Save All Attendance")
+    save_submitted = st.button("Save All Attendance", type="primary")
 
     if save_submitted:
         saved_count = 0

@@ -103,16 +103,13 @@ def render_student_portal_page() -> None:
     st.divider()
     st.subheader("Predictions")
     st.caption(
-        "This system does not track assignment submissions anywhere in its database -- "
-        "enter your own count directly (out of 10) to include it in these predictions."
+        "Based on your marks, attendance, and assignment records on file -- "
+        "computed automatically, nothing to fill in here."
     )
-    assignments_submitted = int(st.number_input(
-        "Assignments submitted (out of 10)", min_value=0, max_value=10, value=5, step=1,
-    ))
 
     if st.button("Show My Predictions"):
         try:
-            risk = predict_at_risk_for_student(roll_no, semester_value, assignments_submitted)
+            risk = predict_at_risk_for_student(roll_no, semester_value)
             if risk["at_risk"]:
                 st.error(f"At risk of failing -- predicted probability: {risk['risk_probability']:.1%}")
             else:
@@ -121,7 +118,7 @@ def render_student_portal_page() -> None:
             st.warning(f"At-risk prediction unavailable: {error}")
 
         try:
-            final_marks = predict_final_marks_for_student(roll_no, semester_value, assignments_submitted)
+            final_marks = predict_final_marks_for_student(roll_no, semester_value)
             st.metric("Predicted final percentage", f"{final_marks['predicted_final_percentage']}%")
         except (ModelNotFoundError, ValidationError) as error:
             st.warning(f"Final marks prediction unavailable: {error}")
@@ -135,7 +132,7 @@ def render_student_portal_page() -> None:
     st.divider()
     st.subheader("Report Card")
     if st.button("Generate My Report Card"):
-        pdf_bytes = generate_report_card(roll_no, semester_value, assignments_submitted)
+        pdf_bytes = generate_report_card(roll_no, semester_value)
         st.download_button(
             "Download PDF",
             data=pdf_bytes,

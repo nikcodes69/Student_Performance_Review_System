@@ -569,6 +569,38 @@ def validate_attendance_values(classes_held: int, classes_attended: int) -> None
 
 
 # ---------------------------------------------------------------------------
+# ASSIGNMENT FIELDS (used by modules/assignments.py)
+# ---------------------------------------------------------------------------
+
+def validate_assignment_values(total_assigned: int, submitted: int) -> None:
+    """
+    Validate a pair of assignment numbers together -- mirrors
+    validate_attendance_values() exactly, for the same reason: these two
+    values depend on each other, so they are validated as a pair rather
+    than as two independent single-field checks.
+
+    Mirrors the assignments table's CHECK constraint exactly: both values
+    must be non-negative, and a student cannot have submitted more
+    assignments than were actually assigned.
+
+    Args:
+        total_assigned: Total assignments given for this subject/semester.
+        submitted: Assignments the student actually submitted.
+
+    Raises:
+        ValidationError: if either value is negative, or submitted > total_assigned.
+    """
+    if total_assigned < 0:
+        raise ValidationError("Total assigned cannot be negative.")
+
+    if submitted < 0:
+        raise ValidationError("Submitted cannot be negative.")
+
+    if submitted > total_assigned:
+        raise ValidationError("Submitted cannot be more than total assigned.")
+
+
+# ---------------------------------------------------------------------------
 # AUDIT LOG FIELDS (used by modules/audit.py)
 # ---------------------------------------------------------------------------
 

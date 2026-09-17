@@ -14,18 +14,21 @@ back in utils/exceptions.py in step 1) rather than trying to train a
 replacement on the spot.
 
 ======================================================================
-A REAL GAP THIS FILE HAS TO WORK AROUND: assignments_submitted
+assignments_submitted: NOW COMPUTED FROM REAL RECORDS, NOT TYPED IN
 ======================================================================
-Three of Task 1's five features -- internal marks, attendance, previous
-SGPA, backlog count -- can be computed live from this project's own
-database (students, subjects, marks, attendance tables). The fifth,
-assignments_submitted, CANNOT: nothing in database/db_setup.py's schema
-tracks assignment submissions anywhere (this was flagged already, back in
-ml/generate_data.py's module docstring, as a feature invented for the ML
-task that a real system might track in a separate LMS). Rather than
-silently inventing a number, the prediction pages below ask the user to
-type it in directly, with a visible caption explaining why -- an honest
-gap is better than a fabricated one.
+All five of Task 1's features -- internal marks, attendance, previous
+SGPA, backlog count, and assignments submitted -- are computed live from
+this project's own database (students, subjects, marks, attendance,
+assignments tables). This used to be the one manually-entered feature
+(nothing tracked assignment submissions anywhere), which meant every
+prediction depended on whoever was clicking "Predict" typing in an
+honest number. modules/assignments.py closes that gap: Admin/Teacher
+record real total-assigned/submitted counts per subject, and
+_compute_assignment_engagement() below turns those into the same 0-10
+"engagement score" scale ml/generate_data.py trained the models on (see
+that function's docstring for exactly how the translation works, and
+config.ASSIGNMENT_ENGAGEMENT_SCALE for why both files must agree on the
+same scale).
 
 ======================================================================
 WHY LIVE FEATURE COMPUTATION MUST MATCH THE TRAINING DATA EXACTLY
@@ -53,6 +56,7 @@ import config
 from modules import auth, students
 from modules.marks import compute_sgpa_for_marks, list_marks_for_student
 from modules.attendance import list_attendance_for_student
+from modules.assignments import list_assignments_for_student
 from utils.exceptions import ModelNotFoundError, ValidationError
 from utils.logger import get_logger
 
@@ -142,16 +146,58 @@ def _compute_backlog_count(roll_no: str) -> int:
     return sum(1 for passed in ever_passed.values() if not passed)
 
 
+def _compute_assignment_engagement(roll_no: str, semester: int) -> int:
+    """
+    Compute the "assignments submitted" ML feature (config.
+    ASSIGNMENT_ENGAGEMENT_SCALE, i.e. 0-10) from real assignment records
+    -- see the module docstring for why this replaces a manually-typed
+    number.
+
+    HOW THE TRANSLATION WORKS: a real assignments row is per-subject (a
+    subject might assign 5 things, another 8), but the trained model
+    expects a single flat 0-10 number for the whole semester (matching
+    ml/generate_data.py's synthetic "engagement score"). To bridge that,
+    this function averages the SUBMISSION RATE (submitted / total_assigned)
+    across every subject this student has an assignment record for this
+    semester, then scales that average rate (0.0-1.0) onto the 0-10 range
+    the model was trained on. E.g. an average 80% submission rate across
+    all subjects becomes an engagement score of 8.
+
+    This is an approximation of what the synthetic training data's
+    "assignments_submitted" represented, not a re-derivation of the exact
+    same quantity (the real world doesn't have a single "assignments
+    submitted out of 10" number to look up) -- worth stating plainly
+    rather than implying false precision.
+
+    Returns:
+        An integer 0-config.ASSIGNMENT_ENGAGEMENT_SCALE. Returns 0 if no
+        assignment records exist yet for this semester (treated as "no
+        engagement recorded yet", not an error -- a student legitimately
+        might not have any assignment records early in a semester).
+    """
+    assignment_rows = list_assignments_for_student(roll_no, semester=semester)
+    rates = [
+        row["submitted"] / row["total_assigned"]
+        for row in assignment_rows if row["total_assigned"] > 0
+    ]
+    if not rates:
+        return 0
+
+    average_rate = sum(rates) / len(rates)
+    return round(average_rate * config.ASSIGNMENT_ENGAGEMENT_SCALE)
+
+
 def _compute_live_features(roll_no: str, semester: int) -> dict | None:
     """
-    Compute every ML feature (except assignments_submitted -- see module
-    docstring) for one student in one semester, live from the database.
+    Compute every ML feature for one student in one semester, live from
+    the database.
 
     Returns:
         A dict with keys internal_pct, attendance_pct, practical_pct,
         average_marks, consistency, improvement_rate, previous_sgpa,
-        backlog_count -- or None if the student has no marks recorded yet
-        for this semester (nothing to compute a prediction from).
+        backlog_count, assignments_submitted -- or None if the student has
+        no marks recorded yet for this semester (nothing to compute a
+        prediction from).
     """
     semester_marks = list_marks_for_student(roll_no, semester=semester)
     if not semester_marks:
@@ -214,6 +260,7 @@ def _compute_live_features(roll_no: str, semester: int) -> dict | None:
         "improvement_rate": round(improvement_rate, config.ROUND_DECIMALS),
         "previous_sgpa": round(previous_sgpa, config.ROUND_DECIMALS) if previous_sgpa is not None else 0.0,
         "backlog_count": _compute_backlog_count(roll_no),
+        "assignments_submitted": _compute_assignment_engagement(roll_no, semester),
     }
 
 
@@ -221,15 +268,14 @@ def _compute_live_features(roll_no: str, semester: int) -> dict | None:
 # PREDICTION FUNCTIONS
 # ---------------------------------------------------------------------------
 
-def predict_at_risk_for_student(roll_no: str, semester: int, assignments_submitted: int) -> dict:
+def predict_at_risk_for_student(roll_no: str, semester: int) -> dict:
     """
     Predict at-risk status for an existing student.
 
     Args:
         roll_no: The student.
-        semester: Which semester's marks/attendance to compute features from.
-        assignments_submitted: Manually supplied (see module docstring) --
-            count out of 10.
+        semester: Which semester's marks/attendance/assignments to compute
+            features from.
 
     Returns:
         A dict: at_risk (bool), risk_probability (float, 0-1), and
@@ -248,7 +294,7 @@ def predict_at_risk_for_student(roll_no: str, semester: int, assignments_submitt
 
     model, scaler, metadata = _get_at_risk_model()
 
-    feature_row = {**live_features, "assignments_submitted": assignments_submitted}
+    feature_row = live_features
     X = pd.DataFrame([feature_row])[metadata["features"]]
     X_scaled = scaler.transform(X)
 
@@ -264,14 +310,14 @@ def predict_at_risk_for_student(roll_no: str, semester: int, assignments_submitt
     }
 
 
-def predict_final_marks_for_student(roll_no: str, semester: int, assignments_submitted: int) -> dict:
+def predict_final_marks_for_student(roll_no: str, semester: int) -> dict:
     """
     Predict final percentage for an existing student.
 
     Args:
         roll_no: The student.
-        semester: Which semester's marks/attendance to compute features from.
-        assignments_submitted: Manually supplied -- count out of 10.
+        semester: Which semester's marks/attendance/assignments to compute
+            features from.
 
     Returns:
         A dict: predicted_final_percentage (float), features_used (dict).
@@ -288,7 +334,7 @@ def predict_final_marks_for_student(roll_no: str, semester: int, assignments_sub
 
     model, metadata = _get_final_marks_model()
 
-    feature_row = {**live_features, "assignments_submitted": assignments_submitted}
+    feature_row = live_features
     X = pd.DataFrame([feature_row])[metadata["features"]]
 
     predicted = float(model.predict(X)[0])
@@ -364,19 +410,6 @@ def _select_student_and_semester(key_prefix: str):
     return picked_student["roll_no"], int(semester)
 
 
-def _assignments_input(key_prefix: str) -> int:
-    """Shared UI: the one manually-entered feature. See module docstring
-    for why this cannot be computed automatically."""
-    st.caption(
-        "This system does not track assignment submissions anywhere in its database "
-        "(there is no assignments table) -- enter this student's own record directly."
-    )
-    return int(st.number_input(
-        "Assignments submitted (out of 10)", min_value=0, max_value=10, value=5, step=1,
-        key=f"{key_prefix}_assignments",
-    ))
-
-
 def render_at_risk_page() -> None:
     """Streamlit page: Task 1 -- at-risk classification for one student."""
     auth.require_role(*PREDICTION_ROLES)
@@ -397,11 +430,9 @@ def render_at_risk_page() -> None:
     if roll_no is None:
         return
 
-    assignments_submitted = _assignments_input("at_risk")
-
     if st.button("Predict At-Risk Status"):
         try:
-            result = predict_at_risk_for_student(roll_no, semester, assignments_submitted)
+            result = predict_at_risk_for_student(roll_no, semester)
         except ValidationError as error:
             st.error(str(error))
             return
@@ -433,11 +464,9 @@ def render_final_marks_page() -> None:
     if roll_no is None:
         return
 
-    assignments_submitted = _assignments_input("final_marks")
-
     if st.button("Predict Final Percentage"):
         try:
-            result = predict_final_marks_for_student(roll_no, semester, assignments_submitted)
+            result = predict_final_marks_for_student(roll_no, semester)
         except ValidationError as error:
             st.error(str(error))
             return

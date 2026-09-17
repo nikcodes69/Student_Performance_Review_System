@@ -158,16 +158,17 @@ def _build_attendance_section(subject_attendance: list[dict], styles) -> list:
     return elements
 
 
-def _build_ml_predictions_section(roll_no: str, semester: int, assignments_submitted: int, styles) -> list:
+def _build_ml_predictions_section(roll_no: str, semester: int, styles) -> list:
     """
-    The ML predictions section. Always included once the caller asks for
-    it (i.e. assignments_submitted was provided) -- even if every
+    The ML predictions section. Always included -- even if every
     individual prediction turns out to be unavailable, the section still
     appears explaining why, rather than silently vanishing, which could
     look like the predictions were simply forgotten rather than genuinely
     unavailable (e.g. ml/model_training.ipynb has not been run yet, or
     this is the student's very first semester so there is no "previous"
-    data to compute some features from).
+    data to compute some features from). All three predictions, including
+    the assignment-engagement feature, are computed entirely from real
+    records -- see modules/ml_predictions.py's module docstring.
     """
     from modules.ml_predictions import (
         predict_at_risk_for_student,
@@ -178,7 +179,7 @@ def _build_ml_predictions_section(roll_no: str, semester: int, assignments_submi
     elements = [Paragraph("Machine Learning Predictions", styles["Heading3"])]
 
     try:
-        risk = predict_at_risk_for_student(roll_no, semester, assignments_submitted)
+        risk = predict_at_risk_for_student(roll_no, semester)
         status = "AT RISK" if risk["at_risk"] else "On track"
         elements.append(Paragraph(
             f"At-risk status: <b>{status}</b> (predicted probability: {risk['risk_probability']:.0%})",
@@ -188,7 +189,7 @@ def _build_ml_predictions_section(roll_no: str, semester: int, assignments_submi
         elements.append(Paragraph(f"At-risk prediction unavailable: {error}", styles["Normal"]))
 
     try:
-        final_marks = predict_final_marks_for_student(roll_no, semester, assignments_submitted)
+        final_marks = predict_final_marks_for_student(roll_no, semester)
         elements.append(Paragraph(
             f"Predicted final percentage: <b>{final_marks['predicted_final_percentage']}%</b>",
             styles["Normal"],
@@ -211,18 +212,16 @@ def _build_ml_predictions_section(roll_no: str, semester: int, assignments_submi
     return elements
 
 
-def generate_report_card(roll_no: str, semester: int, assignments_submitted: int | None = None) -> bytes:
+def generate_report_card(roll_no: str, semester: int) -> bytes:
     """
-    Build a complete PDF report card for one student's semester.
+    Build a complete PDF report card for one student's semester, always
+    including the ML predictions section (every feature it needs,
+    including assignment engagement, is computed from real records --
+    see modules/ml_predictions.py's module docstring).
 
     Args:
         roll_no: The student.
         semester: Which semester to report on.
-        assignments_submitted: Optional, out of 10. Only needed to include
-            the ML predictions section (see modules/ml_predictions.py's
-            module docstring for why this one input cannot be looked up
-            automatically) -- if omitted, the PDF is still generated in
-            full, just without that section.
 
     Returns:
         The finished PDF as raw bytes, ready for st.download_button() --
@@ -251,9 +250,8 @@ def generate_report_card(roll_no: str, semester: int, assignments_submitted: int
     story.append(Spacer(1, 0.5 * cm))
     story.extend(_build_attendance_section(subject_attendance, styles))
 
-    if assignments_submitted is not None:
-        story.append(Spacer(1, 0.5 * cm))
-        story.extend(_build_ml_predictions_section(roll_no, semester, assignments_submitted, styles))
+    story.append(Spacer(1, 0.5 * cm))
+    story.extend(_build_ml_predictions_section(roll_no, semester, styles))
 
     story.append(Spacer(1, 1 * cm))
     story.append(Paragraph(
@@ -270,9 +268,10 @@ def generate_report_card(roll_no: str, semester: int, assignments_submitted: int
 # ---------------------------------------------------------------------------
 
 def render_report_card_page() -> None:
-    """Streamlit page: pick a student and semester, optionally provide
-    assignments submitted to include ML predictions, then generate and
-    download the PDF."""
+    """Streamlit page: pick a student and semester, then generate and
+    download the PDF (always includes the ML predictions section -- every
+    feature it needs, including assignment engagement, is computed from
+    real records now, not typed in by hand)."""
     auth.require_role(*REPORT_CARD_ROLES)
     st.title("Report Card Export")
 
@@ -290,13 +289,8 @@ def render_report_card_page() -> None:
         value=picked_student["semester"], step=1,
     )
 
-    include_ml = st.checkbox("Include ML predictions", value=True)
-    assignments_submitted = None
-    if include_ml:
-        assignments_submitted = int(_assignments_input())
-
     if st.button("Generate Report Card"):
-        pdf_bytes = generate_report_card(picked_student["roll_no"], int(semester), assignments_submitted)
+        pdf_bytes = generate_report_card(picked_student["roll_no"], int(semester))
         st.success("Report card generated.")
         st.download_button(
             "Download PDF",
@@ -304,11 +298,3 @@ def render_report_card_page() -> None:
             file_name=f"{picked_student['roll_no']}_semester{int(semester)}_report_card.pdf",
             mime="application/pdf",
         )
-
-
-def _assignments_input() -> int:
-    st.caption(
-        "This system does not track assignment submissions anywhere in its database -- "
-        "enter this student's own record directly."
-    )
-    return st.number_input("Assignments submitted (out of 10)", min_value=0, max_value=10, value=5, step=1)

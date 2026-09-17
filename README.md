@@ -7,26 +7,47 @@ classification, final-marks regression, and student segmentation).
 
 ## Tech stack
 
-Python 3.13 | Streamlit | SQLite | Pandas | NumPy | Plotly | scikit-learn |
-joblib | bcrypt | ReportLab | pytest
+Python 3.13 | Streamlit | SQLite (local) / Turso-libSQL (cloud, optional) |
+Pandas | NumPy | Plotly | scikit-learn | joblib | bcrypt | ReportLab | pytest
 
 ## Features
 
 | # | Feature | Where |
 |---|---|---|
-| 1 | Authentication (Admin/Teacher/Student roles, bcrypt, session timeout) | `modules/auth.py` |
-| 2 | Student management (CRUD, validation, soft delete) | `modules/students.py` |
-| 3 | Subject & curriculum configuration | `modules/subjects.py` |
-| 4 | Marks entry with audit logging | `modules/marks.py` |
-| 5 | Attendance tracking with percentage calculation | `modules/attendance.py` |
-| 6 | Grade engine (percentage, grade, SGPA, CGPA, pass/fail) | `modules/grades.py` |
-| 7 | Analytics dashboard (averages, trends, distribution, correlation, difficulty index) | `modules/analytics.py` |
-| 8 | ML: at-risk classification | `modules/ml_predictions.py` |
-| 9 | ML: final marks regression | `modules/ml_predictions.py` |
-| 10 | ML: student segmentation | `modules/ml_predictions.py` |
-| 11 | Model comparison page | `modules/ml_predictions.py` |
-| 12 | PDF report card export (incl. ML predictions) | `utils/pdf_generator.py` |
-| 13 | Audit log viewer (Admin only) | `modules/audit.py` |
+| 1 | Authentication (Admin/Teacher/Student roles, bcrypt, session timeout, dark/light theme) | `modules/auth.py` |
+| 2 | Student self-registration + Admin-managed User Management | `modules/auth.py` |
+| 3 | Student management (CRUD, validation, soft delete) | `modules/students.py` |
+| 4 | Subject & curriculum configuration | `modules/subjects.py` |
+| 5 | Marks entry with audit logging | `modules/marks.py` |
+| 6 | Attendance tracking (submitted-cannot-exceed-held enforced live in the UI) | `modules/attendance.py` |
+| 7 | Assignment tracking (real records, not a manually-typed ML input) | `modules/assignments.py` |
+| 8 | Grade engine (percentage, grade, SGPA, CGPA, pass/fail) | `modules/grades.py` |
+| 9 | Analytics dashboard (averages, trends, distribution, correlation, difficulty index) | `modules/analytics.py` |
+| 10 | ML: at-risk classification | `modules/ml_predictions.py` |
+| 11 | ML: final marks regression | `modules/ml_predictions.py` |
+| 12 | ML: student segmentation | `modules/ml_predictions.py` |
+| 13 | Model comparison page | `modules/ml_predictions.py` |
+| 14 | PDF report card export (incl. ML predictions) | `utils/pdf_generator.py` |
+| 15 | Audit log viewer (Admin only) | `modules/audit.py` |
+| 16 | Student-facing "My Performance" portal | `modules/student_portal.py` |
+
+### Beyond the original 13-module spec
+
+This system grew past its original scope during development, in response
+to real usage:
+- **Cloud database (Turso/libSQL)**: `database/db_setup.py`'s
+  `get_connection()` uses Turso when `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`
+  are configured in Streamlit secrets, falling back to local SQLite
+  otherwise -- local development and all 90 tests stay fully offline.
+- **Dark mode**: `.streamlit/config.toml` defines both `[theme.light]`
+  and `[theme.dark]` -- Streamlit's own built-in Settings menu lets each
+  user switch, no custom code involved.
+- **Assignments are a real, tracked feature**, not a number typed in by
+  hand every time a prediction is requested (see `modules/assignments.py`
+  and `modules/ml_predictions.py`'s `_compute_assignment_engagement()`).
+- **Google Sign-In**: prepared but not yet wired up -- requires OAuth
+  credentials from Google Cloud Console, which only the project owner can
+  create.
 
 ## Project structure
 
@@ -40,26 +61,31 @@ student_performance_system/
 │   ├── db_manager.py          # runtime query layer (fetch_one/fetch_all/execute_write/execute_transaction)
 │   └── student_data.db        # created by db_setup.py (gitignored)
 ├── modules/
-│   ├── auth.py                # authentication, RBAC, Streamlit session
+│   ├── auth.py                # authentication, RBAC, self-registration, User Management, Streamlit session
 │   ├── students.py            # student CRUD
 │   ├── subjects.py            # subject/curriculum CRUD
-│   ├── marks.py                # marks entry, correction
-│   ├── attendance.py          # attendance entry, correction
+│   ├── marks.py                # marks entry, correction, shared SGPA helper
+│   ├── attendance.py          # attendance entry, correction (live UI-enforced held >= attended)
+│   ├── assignments.py         # assignment tracking (feeds the ML engagement feature)
 │   ├── grades.py              # grade engine (pure functions, no DB/UI)
 │   ├── analytics.py           # dashboard queries + Plotly charts
 │   ├── ml_predictions.py      # loads trained models, predicts, ML pages
+│   ├── student_portal.py      # Student-only "My Performance" page
 │   └── audit.py               # audit trail read/write + viewer page
 ├── ml/
 │   ├── generate_data.py       # synthetic training data generator
 │   ├── model_training.ipynb   # the only place models are trained
 │   ├── data/                  # generated training CSV (tracked in git -- deterministic, small)
-│   ├── models/                # trained .pkl + metadata JSON (gitignored -- regenerate from the notebook)
+│   ├── models/                # trained .pkl + metadata JSON (tracked in git -- small, deterministic, needed for the deployed app to serve predictions)
 │   └── results/               # model comparison CSVs (tracked -- used in the project report)
 ├── utils/
 │   ├── validators.py          # validation layer, checked before every DB write
 │   ├── exceptions.py          # domain-specific exception classes
 │   ├── logger.py              # logging configuration (writes to logs/app.log)
 │   └── pdf_generator.py       # report card PDF builder + trigger page
+├── .streamlit/
+│   ├── config.toml            # light/dark theme (tracked)
+│   └── secrets.toml           # Turso credentials (gitignored -- never commit this)
 ├── tests/
 │   ├── test_validators.py
 │   ├── test_grades.py
@@ -128,10 +154,10 @@ here; change this password immediately after first login.
 python -m pytest -v
 ```
 
-85 tests across three files:
-- `tests/test_validators.py` (54 tests) — every validation rule, including boundary values.
+90 tests across three files:
+- `tests/test_validators.py` (58 tests) — every validation rule, including boundary values.
 - `tests/test_grades.py` (20 tests) — percentage/grade/SGPA/CGPA calculations, including deliberately adversarial edge cases like division-by-zero guards and off-by-one grade boundaries.
-- `tests/test_database.py` (11 tests) — CHECK/UNIQUE/FOREIGN KEY constraints and the `PRAGMA foreign_keys` setting itself, run against a throwaway temporary database (never the real `student_data.db`) created fresh for every test.
+- `tests/test_database.py` (12 tests) — CHECK/UNIQUE/FOREIGN KEY constraints and the `PRAGMA foreign_keys` setting itself, run against a throwaway temporary database (never the real `student_data.db`, and never the real Turso database either) created fresh for every test.
 
 ## Database design
 
@@ -193,10 +219,6 @@ in `ml/results/*.csv`.
 
 ## Known limitations (documented deliberately, not discovered by accident)
 
-- **`assignments_submitted`** is a feature the ML models need but the
-  live database schema doesn't track anywhere (no assignments table) —
-  the prediction pages ask the user to enter it manually, with an
-  on-screen explanation of why.
 - **No teacher-to-subject assignment table**: any Teacher account can
   currently enter marks/attendance for any subject.
 - **The default admin password is hardcoded and visible in source** (see

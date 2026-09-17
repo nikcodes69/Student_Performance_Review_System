@@ -196,6 +196,17 @@ def test_attendance_attended_cannot_exceed_held(test_db):
         )
 
 
+def test_assignments_submitted_cannot_exceed_total_assigned(test_db):
+    _insert_student(test_db, "BCA008")
+    _insert_subject(test_db, "SUB007")
+    with pytest.raises(sqlite3.IntegrityError):
+        test_db.execute(
+            "INSERT INTO assignments (roll_no, subject_code, total_assigned, submitted, semester) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("BCA008", "SUB007", 5, 8, 1),
+        )
+
+
 def test_subjects_all_zero_max_marks_rejected(test_db):
     with pytest.raises(sqlite3.IntegrityError):
         test_db.execute(

@@ -328,6 +328,34 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # assignments
+        # ---------------------------------------------------------------
+        # Same shape as attendance immediately above, for the same reason:
+        # "submitted cannot exceed total_assigned" is a same-row CHECK,
+        # exactly like "classes_attended <= classes_held". This table
+        # exists so the "assignments submitted" feature the ML models use
+        # (see ml/generate_data.py) can be computed from real records
+        # instead of asking a Teacher to type a number in by hand every
+        # time a prediction is requested -- see
+        # modules/ml_predictions.py's _compute_assignment_engagement().
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS assignments (
+                assignment_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+                roll_no        TEXT NOT NULL,
+                subject_code   TEXT NOT NULL,
+                total_assigned INTEGER NOT NULL CHECK (total_assigned >= 0),
+                submitted      INTEGER NOT NULL
+                                   CHECK (submitted >= 0 AND submitted <= total_assigned),
+                semester       INTEGER NOT NULL,
+                created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (roll_no) REFERENCES students (roll_no),
+                FOREIGN KEY (subject_code) REFERENCES subjects (subject_code),
+                UNIQUE (roll_no, subject_code, semester)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # semesters
         # ---------------------------------------------------------------
         # This table has no single-column primary key -- (roll_no,
@@ -438,6 +466,8 @@ def create_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_marks_subject_code ON marks (subject_code)",
         "CREATE INDEX IF NOT EXISTS idx_attendance_roll_no ON attendance (roll_no)",
         "CREATE INDEX IF NOT EXISTS idx_attendance_subject_code ON attendance (subject_code)",
+        "CREATE INDEX IF NOT EXISTS idx_assignments_roll_no ON assignments (roll_no)",
+        "CREATE INDEX IF NOT EXISTS idx_assignments_subject_code ON assignments (subject_code)",
         "CREATE INDEX IF NOT EXISTS idx_semesters_roll_no ON semesters (roll_no)",
         "CREATE INDEX IF NOT EXISTS idx_audit_log_table_record "
         "ON audit_log (table_name, record_id)",

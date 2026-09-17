@@ -222,7 +222,7 @@ AUDIT_ACTIONS = (AUDIT_INSERT, AUDIT_UPDATE, AUDIT_SOFT_DELETE)
 # them explicitly (rather than accepting any string) catches a typo like
 # "student" instead of "students" at validation time, before it becomes a
 # confusing, silently-wrong row in audit_log.
-AUDITED_TABLES = ("students", "subjects", "marks", "attendance", "semesters", "users")
+AUDITED_TABLES = ("students", "subjects", "marks", "attendance", "semesters", "users", "assignments")
 
 # ---------------------------------------------------------------------------
 # 9. MACHINE LEARNING CONFIGURATION (used in ml/ and modules/ml_predictions.py)
@@ -238,3 +238,14 @@ TEST_SIZE = 0.2
 
 # Number of folds for k-fold cross-validation.
 CV_FOLDS = 5
+
+# The scale the "assignments submitted" ML feature was trained on (see
+# ml/generate_data.py's MAX_ASSIGNMENTS, generated as a 0-10 "engagement"
+# style number). The live app now computes a real value on this same
+# scale from the assignments table -- see
+# modules/ml_predictions.py's _compute_assignment_engagement() -- rather
+# than asking a Teacher to type a number in by hand. Defined here, not
+# only in ml/generate_data.py, because BOTH the training-data generator
+# and the live feature computation must agree on the same scale for
+# predictions to mean what the model was trained to expect.
+ASSIGNMENT_ENGAGEMENT_SCALE = 10

@@ -107,7 +107,12 @@ PREV_ABILITY_NOISE_STD = 8.0
 PREV_PERCENTAGE_PARAMS = (5.0, 0.75, 12.0)
 
 # Assignments submitted, out of this many total assignments in a semester.
-MAX_ASSIGNMENTS = 10
+# config.ASSIGNMENT_ENGAGEMENT_SCALE, not a local constant, because the
+# live app (modules/ml_predictions.py) now computes a real value on this
+# same 0-10 scale from actual assignment records -- both places must
+# agree on the same scale for predictions to mean what this training data
+# taught the model to expect.
+MAX_ASSIGNMENTS = config.ASSIGNMENT_ENGAGEMENT_SCALE
 ASSIGNMENTS_SLOPE = 0.09  # applied to latent_ability, roughly 0-9 before noise
 ASSIGNMENTS_NOISE_STD = 1.3
 

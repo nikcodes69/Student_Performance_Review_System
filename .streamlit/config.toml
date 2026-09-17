@@ -2,14 +2,30 @@
 # theming mechanism (no custom CSS/JS injection needed). Every widget
 # across every page in this app picks up these colors automatically.
 # Reference: https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+#
+# DARK MODE: [theme.light] and [theme.dark] below define two complete,
+# named variants. Streamlit's own built-in Settings menu (the "⋮" icon,
+# top-right of any page -> "Choose app theme, colors and fonts") lets each
+# user pick Light, Dark, or "Use system setting" -- no code, no toggle
+# button, no session_state needed on our end; this is Streamlit's native
+# mechanism, not a custom implementation. Deliberately NOT setting a top-
+# level `base` here (step 13's original theme did) -- doing so would lock
+# the app to one variant and hide that menu choice from users.
 
 [theme]
-base = "light"
-primaryColor = "#4F46E5"            # indigo -- buttons, active nav item, progress bars, links
+primaryColor = "#4F46E5"  # indigo -- buttons, active nav item, progress bars, links (shared by both variants)
+font = "sans serif"
+
+[theme.light]
 backgroundColor = "#FFFFFF"          # main page background
 secondaryBackgroundColor = "#F3F4F6" # sidebar background, input fields, cards
 textColor = "#111827"                # near-black, high contrast on white
-font = "sans serif"
+
+[theme.dark]
+primaryColor = "#818CF8"             # a lighter indigo than the light theme's -- the darker #4F46E5 reads as low-contrast/muddy on a dark background
+backgroundColor = "#0F172A"          # slate-900, a dark navy rather than pure black (easier on the eyes, standard in modern dark UIs)
+secondaryBackgroundColor = "#1E293B" # slate-800
+textColor = "#F1F5F9"                # slate-100, near-white
 
 [server]
 # Streamlit's default is a reasonable size limit already; kept explicit
