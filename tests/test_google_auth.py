@@ -1,0 +1,201 @@
+"""
+tests/test_google_auth.py
+==========================
+pytest tests for Google Sign-In: modules/auth.py's
+authenticate_with_google(), link_google_account(), and
+unlink_google_account() -- see that module's docstring's "GOOGLE
+SIGN-IN" section for the full trust model these follow (the same
+asymmetric rule as self_register_student()/create_user(): a Student can
+self-associate via a matching email, Teacher/Admin never can).
+
+WHY try_google_login() ITSELF IS NOT TESTED HERE: it reads st.user
+(Streamlit's own OAuth session proxy) and drives st.session_state/
+st.stop()/st.rerun() -- the same class of Streamlit-runtime-dependent
+function as login()/render_change_password_page(), which this project
+has never unit-tested directly either (see modules/auth.py's own module
+docstring on why the file is split into a pure-logic half, tested here,
+and a Streamlit-session half, verified manually). authenticate_with_google()
+IS the pure-logic half for Google Sign-In, and is exactly what this file
+covers.
+
+REGRESSION COVERAGE FOR A REAL BUG FOUND WHILE BUILDING THIS FEATURE:
+self_register_student() and authenticate_with_google() both derive a
+Student's username directly from roll_no, but used to route it back
+through create_user()'s own validate_username() (min 4 characters,
+letters/digits/underscore only) -- rules that do not match
+validate_roll_no()'s own, more permissive ones (no minimum length, no
+character-set restriction). This silently broke both self-registration
+and Google Sign-In for any roll_no shorter than 4 characters, including
+this project's OWN real production data (roll_no "1" and "2"). Fixed by
+extracting _insert_user_row() so the Student-specific paths skip the
+mismatched generic username policy entirely -- see that function's
+docstring. test_authenticate_with_google_auto_registers_short_roll_no
+below is the regression test for this specific bug.
+
+HOW THIS AVOIDS TOUCHING THE REAL DATABASE: the test_db fixture below is
+the same throwaway-database pattern as tests/test_database.py -- see
+that file's module docstring for the full rationale.
+
+HOW TO RUN (from the project root):
+    python -m pytest tests/test_google_auth.py -v
+"""
+
+import pytest
+
+import config
+import database.db_setup as db_setup
+import modules.auth as auth
+from database.db_setup import create_indexes, create_tables, get_connection
+from utils.exceptions import AuthenticationError, AuthorizationError, DuplicateRecordError, ValidationError
+
+
+@pytest.fixture
+def test_db(tmp_path, monkeypatch):
+    """A fresh, fully-constrained, empty test database -- see
+    tests/test_database.py's test_db fixture for the full rationale."""
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test_google_auth.db")
+    monkeypatch.setattr(db_setup, "_get_turso_credentials", lambda: (None, None))
+
+    conn = get_connection()
+    create_tables(conn)
+    create_indexes(conn)
+    conn.commit()
+    conn.close()
+
+    yield
+
+
+def _admin_user() -> dict:
+    admin_id = auth.create_user("admin", "AdminPass1!", config.ROLE_ADMIN)
+    return {"user_id": admin_id, "role": config.ROLE_ADMIN, "username": "admin"}
+
+
+# ---------------------------------------------------------------------------
+# authenticate_with_google() -- Student auto-registration
+# ---------------------------------------------------------------------------
+
+def test_authenticate_with_google_rejects_unknown_email(test_db):
+    with pytest.raises(AuthenticationError):
+        auth.authenticate_with_google("nobody@gmail.com")
+
+
+def test_authenticate_with_google_auto_registers_matching_active_student(test_db):
+    admin_user = _admin_user()
+    from modules import students
+    students.create_student("BCA0S1", "Alice", 1, "BCA", "alice@gmail.com", "9812345678", 2024, admin_user)
+
+    user = auth.authenticate_with_google("alice@gmail.com")
+
+    assert user["username"] == "BCA0S1"
+    assert user["role"] == config.ROLE_STUDENT
+    assert user["must_change_password"] is False  # they never need to -- there's no "given" password to replace
+
+
+def test_authenticate_with_google_auto_registers_short_roll_no(test_db):
+    """Regression test: see this file's module docstring for the bug
+    this specifically guards against -- a 1-character roll_no (this
+    project's own real data) used to be silently rejected."""
+    admin_user = _admin_user()
+    from modules import students
+    students.create_student("1", "Nikhil Thapa", 1, "BCA", "nikhil@gmail.com", "9818182402", 2026, admin_user)
+
+    user = auth.authenticate_with_google("nikhil@gmail.com")
+    assert user["username"] == "1"
+
+
+def test_authenticate_with_google_rejects_inactive_student(test_db):
+    admin_user = _admin_user()
+    from modules import students
+    students.create_student("BCA0S2", "Bob", 1, "BCA", "bob@gmail.com", "9812345679", 2024, admin_user)
+    students.deactivate_student("BCA0S2", admin_user)
+
+    with pytest.raises(AuthenticationError):
+        auth.authenticate_with_google("bob@gmail.com")
+
+
+def test_authenticate_with_google_is_idempotent_on_repeated_sign_in(test_db):
+    admin_user = _admin_user()
+    from modules import students
+    students.create_student("BCA0S1", "Alice", 1, "BCA", "alice@gmail.com", "9812345678", 2024, admin_user)
+
+    first = auth.authenticate_with_google("alice@gmail.com")
+    second = auth.authenticate_with_google("alice@gmail.com")
+
+    assert first["user_id"] == second["user_id"]  # same account, not a duplicate
+
+
+def test_authenticate_with_google_rejects_when_unlinked_login_already_exists(test_db):
+    admin_user = _admin_user()
+    from modules import students
+    students.create_student("BCA0S3", "Carol", 1, "BCA", "carol@gmail.com", "9812345680", 2024, admin_user)
+    auth.create_user("BCA0S3", "SomePass1!", config.ROLE_STUDENT, force_password_change=False)
+
+    with pytest.raises(AuthenticationError):
+        auth.authenticate_with_google("carol@gmail.com")
+
+
+# ---------------------------------------------------------------------------
+# link_google_account() / unlink_google_account() -- Teacher/Admin, Admin-driven
+# ---------------------------------------------------------------------------
+
+def test_link_google_account_lets_teacher_sign_in_with_google(test_db):
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+
+    auth.link_google_account(teacher_id, "teacher1@gmail.com", admin_user)
+    logged_in = auth.authenticate_with_google("teacher1@gmail.com")
+
+    assert logged_in["role"] == config.ROLE_TEACHER
+    assert logged_in["user_id"] == teacher_id
+
+
+def test_link_google_account_rejects_duplicate_email(test_db):
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+    other_teacher_id = auth.create_user("teach2", "TeachPass2!", config.ROLE_TEACHER)
+    auth.link_google_account(teacher_id, "shared@gmail.com", admin_user)
+
+    with pytest.raises(DuplicateRecordError):
+        auth.link_google_account(other_teacher_id, "shared@gmail.com", admin_user)
+
+
+def test_link_google_account_requires_admin_role(test_db):
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+    teacher_acting_user = {"user_id": teacher_id, "role": config.ROLE_TEACHER, "username": "teach1"}
+
+    with pytest.raises(AuthorizationError):
+        auth.link_google_account(teacher_id, "x@gmail.com", teacher_acting_user)
+
+
+def test_unlink_google_account_removes_google_sign_in_access(test_db):
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+    auth.link_google_account(teacher_id, "teacher1@gmail.com", admin_user)
+
+    auth.unlink_google_account(teacher_id, admin_user)
+
+    with pytest.raises(AuthenticationError):
+        auth.authenticate_with_google("teacher1@gmail.com")
+
+
+def test_unlink_google_account_rejects_when_nothing_linked(test_db):
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+
+    with pytest.raises(ValidationError):
+        auth.unlink_google_account(teacher_id, admin_user)
+
+
+# ---------------------------------------------------------------------------
+# list_users() -- google_email column
+# ---------------------------------------------------------------------------
+
+def test_list_users_includes_google_email(test_db):
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+    auth.link_google_account(teacher_id, "teacher1@gmail.com", admin_user)
+
+    users = {u["username"]: u for u in auth.list_users()}
+    assert users["admin"]["google_email"] is None
+    assert users["teach1"]["google_email"] == "teacher1@gmail.com"

@@ -7,6 +7,12 @@
 # --- Web application framework ---
 streamlit==1.64.0
 
+# --- Google Sign-In (st.login/st.logout/st.user) -- see
+# modules/auth.py's authenticate_with_google(). Only used when an
+# [auth]/[auth.google] section is configured in Streamlit secrets;
+# the rest of the app works unchanged without it.
+Authlib==1.8.0
+
 # --- Data handling ---
 pandas==3.0.5
 numpy==2.5.3

@@ -47,8 +47,34 @@ student's records, the audit log, everything. Instead:
     (`python -m modules.auth`) when NO admin exists at all yet. There is
     no page anywhere in this app where a visitor can choose "Teacher" or
     "Admin" for themselves.
+
+======================================================================
+GOOGLE SIGN-IN -- THE SAME ASYMMETRIC RULE, VIA A DIFFERENT PROOF OF IDENTITY
+======================================================================
+authenticate_with_google() (below) is the Google-authenticated counterpart
+to authenticate()/self_register_student(), and follows the EXACT SAME
+trust rule, just with Google's own identity verification standing in for
+a typed password:
+
+  - STUDENT: a Google-verified email that matches an ACTIVE student
+    record's own email (the same match self_register_student() already
+    requires) gets a login auto-created on the spot, the first time they
+    sign in with that Google account -- no password to choose at all,
+    since Google already proved who they are. A student who already has
+    a username/password login can also be LINKED to their Google account
+    afterwards (see link_google_account() below), letting either method
+    work from then on.
+
+  - TEACHER and ADMIN: never auto-created this way, for the identical
+    reason they are never self-service through the signup form -- only
+    an existing Admin can link a Google email to an already-existing
+    Teacher/Admin account (link_google_account(), used from
+    render_user_management_page()). There is no path where signing in
+    with a Google account grants Teacher or Admin access to someone who
+    does not already have it.
 """
 
+import secrets
 from datetime import datetime, timedelta
 
 import bcrypt
@@ -132,9 +158,77 @@ def verify_password(password: str, password_hash: str) -> bool:
 # USER CREATION AND LOGIN (database-backed, no Streamlit here)
 # ---------------------------------------------------------------------------
 
+def _insert_user_row(
+    username: str, password: str, role: str, force_password_change: bool,
+    google_email: str | None = None,
+) -> int:
+    """
+    Shared INSERT logic behind create_user() and the two places that
+    build a Student login directly from an already-validated roll_no
+    (self_register_student(), authenticate_with_google() below) --
+    duplicate-username check, password hashing, and the actual write.
+
+    WHY THOSE TWO CALLERS DO NOT GO THROUGH create_user() ITSELF: this
+    project's own convention (see this module's docstring) is that a
+    Student's username IS their roll_no -- but validate_username() (which
+    create_user() calls) enforces rules meant for a HUMAN-CHOSEN Admin/
+    Teacher username (config.USERNAME_MIN_LENGTH=4, letters/digits/
+    underscore only), which do not match validate_roll_no()'s own, more
+    permissive rules (no minimum length, no character-set restriction --
+    see that function). A real roll number can legitimately be shorter
+    than 4 characters (this project's own real student data uses "1" and
+    "2"), which validate_username() would silently reject even though
+    validate_roll_no() already accepted it -- self-registration and
+    Google Sign-In would both quietly break for exactly those students.
+    roll_no has ALREADY been validated (and normalised) by
+    validate_roll_no() by the time it reaches this function in both
+    callers, so re-running the mismatched, stricter username policy on
+    top of it would be actively wrong, not just redundant.
+
+    Args:
+        username: Already validated (either via validate_username(), by
+            create_user() below, or via validate_roll_no(), by the two
+            Student-specific callers).
+        password: Already-validated plaintext password.
+        role: Already-validated role.
+        force_password_change: See create_user()'s docstring.
+        google_email: If given, linked on this same INSERT (used only by
+            authenticate_with_google()'s auto-registration path).
+
+    Returns:
+        The new user's user_id.
+
+    Raises:
+        DuplicateRecordError: if the username is already taken.
+        DatabaseError: if the insert fails for any other reason.
+    """
+    existing = fetch_one("SELECT user_id FROM users WHERE username = ?", (username,))
+    if existing is not None:
+        raise DuplicateRecordError(f"Username '{username}' is already taken.")
+
+    password_hash = hash_password(password)
+
+    user_id = execute_write(
+        "INSERT INTO users (username, password_hash, role, must_change_password, google_email) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (username, password_hash, role, 1 if force_password_change else 0, google_email),
+    )
+
+    # We log that a user was created, and its role, but NEVER the password
+    # or its hash -- logs are written to a plain text file
+    # (logs/app.log) that should never contain secrets.
+    logger.info("Created user '%s' with role '%s' (user_id=%s).", username, role, user_id)
+    return user_id
+
+
 def create_user(username: str, password: str, role: str, force_password_change: bool = True) -> int:
     """
-    Create a new user account.
+    Create a new user account with a HUMAN-CHOSEN username (an Admin
+    typing a Teacher/Admin username, or the bootstrap admin account) --
+    see _insert_user_row()'s docstring for why the two Student-specific
+    callers (self_register_student(), authenticate_with_google()) build
+    their own username from roll_no and call _insert_user_row() directly
+    instead of this function.
 
     Args:
         username: The desired login username.
@@ -148,10 +242,7 @@ def create_user(username: str, password: str, role: str, force_password_change: 
             This default fits the common case: whoever CALLS create_user()
             (an Admin, or the one-time bootstrap script) is choosing a
             password FOR someone else, so that person should pick their
-            own the moment they first log in. The one case that should
-            NOT force a change is self_register_student() below, where the
-            student already chose their own password during signup -- it
-            passes force_password_change=False explicitly.
+            own the moment they first log in.
 
     Returns:
         The new user's user_id.
@@ -165,22 +256,27 @@ def create_user(username: str, password: str, role: str, force_password_change: 
     password = validate_password(password)
     role = validate_role(role)
 
-    existing = fetch_one("SELECT user_id FROM users WHERE username = ?", (username,))
-    if existing is not None:
-        raise DuplicateRecordError(f"Username '{username}' is already taken.")
+    return _insert_user_row(username, password, role, force_password_change)
 
-    password_hash = hash_password(password)
 
-    user_id = execute_write(
-        "INSERT INTO users (username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?)",
-        (username, password_hash, role, 1 if force_password_change else 0),
-    )
+def _random_unusable_password() -> str:
+    """
+    Generate a random plaintext password for a Google-only account -- one
+    that satisfies the schema's password_hash NOT NULL constraint (see
+    database/db_setup.py's users table) but is never shown to anyone and
+    never meant to be typed in: an account created this way (see
+    authenticate_with_google() below) can only ever be reached by signing
+    in with the SAME Google account again, unless an Admin later resets
+    its password by hand (admin_reset_password()).
 
-    # We log that a user was created, and its role, but NEVER the password
-    # or its hash -- logs are written to a plain text file
-    # (logs/app.log) that should never contain secrets.
-    logger.info("Created user '%s' with role '%s' (user_id=%s).", username, role, user_id)
-    return user_id
+    secrets.token_urlsafe(32), not random/uuid: this module already
+    relies on bcrypt for genuine cryptographic randomness in
+    hash_password() (via bcrypt.gensalt()) -- token_urlsafe uses Python's
+    os.urandom() under the hood, the same class of cryptographically
+    secure source, appropriate for a value that (however briefly, before
+    being hashed and discarded) stands in as this account's password.
+    """
+    return secrets.token_urlsafe(32)
 
 
 def self_register_student(roll_no: str, email: str, password: str) -> int:
@@ -232,11 +328,20 @@ def self_register_student(roll_no: str, email: str, password: str) -> int:
             "Contact an administrator if you believe this is an error."
         )
 
+    password = validate_password(password)
+
+    # _insert_user_row(), not create_user(): roll_no is already validated
+    # (and normalised) by validate_roll_no() above -- see that function's
+    # docstring for why re-running create_user()'s OWN validate_username()
+    # on top of it would be wrong, not just redundant, for a roll number
+    # shorter than config.USERNAME_MIN_LENGTH (e.g. this project's real
+    # data: roll_no "1" and "2").
+    #
     # force_password_change=False: unlike an Admin-created account, this
     # student already chose their own password just now -- there is no
     # "given" password to replace on first login.
-    user_id = create_user(
-        username=roll_no, password=password, role=config.ROLE_STUDENT, force_password_change=False
+    user_id = _insert_user_row(
+        username=roll_no, password=password, role=config.ROLE_STUDENT, force_password_change=False,
     )
     logger.info("Student '%s' self-registered a login (user_id=%s).", roll_no, user_id)
     return user_id
@@ -302,6 +407,95 @@ def authenticate(username: str, password: str) -> dict:
         "username": user_row["username"],
         "role": user_row["role"],
         "must_change_password": bool(user_row["must_change_password"]),
+    }
+
+
+def authenticate_with_google(google_email: str) -> dict:
+    """
+    The Google-authenticated counterpart to authenticate() -- see this
+    module's docstring's "GOOGLE SIGN-IN" section for the full trust
+    model this follows. Called from try_google_login() below, once
+    Streamlit's own OAuth round-trip (st.login("google")) has already
+    confirmed google_email is a real, provider-verified identity -- this
+    function never itself talks to Google or checks a password; its job
+    is entirely "map this already-verified email to an app account".
+
+    Args:
+        google_email: The verified email address from st.user.email.
+
+    Returns:
+        A dict with keys "user_id", "username", "role",
+        "must_change_password" -- identical shape to authenticate(), so
+        try_google_login() can populate the Streamlit session exactly
+        the way login() already does for a password login.
+
+    Raises:
+        AuthenticationError: if google_email matches neither an already-
+            linked account nor an active student record's own email, if
+            it matches a student but a login already exists for that
+            roll_no under a DIFFERENT (unlinked) account, or if the
+            matched account has been deactivated.
+    """
+    google_email = validate_email(google_email)
+
+    existing = fetch_one(
+        "SELECT user_id, username, role, is_active, must_change_password "
+        "FROM users WHERE google_email = ?",
+        (google_email,),
+    )
+
+    if existing is None:
+        # No account linked to this Google email yet -- see if an ACTIVE
+        # student's own email matches, the same trust rule
+        # self_register_student() already uses for a typed-password signup.
+        student_row = fetch_one(
+            "SELECT roll_no FROM students WHERE email = ? AND is_active = 1", (google_email,),
+        )
+        if student_row is None:
+            raise AuthenticationError(
+                "No account is linked to this Google email. Students: make sure this is "
+                "the email address on file for your roll number, or contact an administrator. "
+                "Teachers/Admins: ask an administrator to link your Google account."
+            )
+
+        roll_no = student_row["roll_no"]
+        already_has_login = fetch_one("SELECT user_id FROM users WHERE username = ?", (roll_no,))
+        if already_has_login is not None:
+            raise AuthenticationError(
+                f"A login already exists for roll number '{roll_no}', but it is not linked "
+                "to this Google email yet. Log in with your username and password instead, "
+                "then ask an administrator to link your Google account."
+            )
+
+        # _insert_user_row(), not create_user(): roll_no came straight
+        # from our own students table, already validated (and
+        # normalised) when that record was created -- see
+        # _insert_user_row()'s docstring for why running it through
+        # create_user()'s OWN validate_username() on top of that would
+        # be wrong, not just redundant, for a short roll number (e.g.
+        # this project's real data: roll_no "1" and "2").
+        user_id = _insert_user_row(
+            username=roll_no, password=_random_unusable_password(), role=config.ROLE_STUDENT,
+            force_password_change=False, google_email=google_email,
+        )
+        logger.info("Student '%s' auto-registered via Google Sign-In (user_id=%s).", roll_no, user_id)
+        existing = fetch_one(
+            "SELECT user_id, username, role, is_active, must_change_password FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+
+    if not existing["is_active"]:
+        logger.warning("Google Sign-In failed: account '%s' is deactivated.", existing["username"])
+        raise AuthenticationError("This account has been deactivated. Contact an administrator.")
+
+    execute_write("UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = ?", (existing["user_id"],))
+    logger.info("User '%s' authenticated via Google Sign-In.", existing["username"])
+
+    return {
+        "user_id": existing["user_id"],
+        "username": existing["username"],
+        "role": existing["role"],
+        "must_change_password": bool(existing["must_change_password"]),
     }
 
 
@@ -371,10 +565,11 @@ def list_users() -> list[dict]:
 
     Returns:
         A list of dicts: user_id, username, role, is_active, created_at,
-        last_login. Ordered by username.
+        last_login, google_email (None if no Google account is linked).
+        Ordered by username.
     """
     return fetch_all(
-        "SELECT user_id, username, role, is_active, created_at, last_login "
+        "SELECT user_id, username, role, is_active, created_at, last_login, google_email "
         "FROM users ORDER BY username"
     )
 
@@ -573,6 +768,101 @@ def admin_reset_password(user_id: int, new_password: str, acting_user: dict) -> 
     )
 
 
+def link_google_account(user_id: int, google_email: str, acting_user: dict) -> None:
+    """
+    Link an EXISTING account to a Google email, so it can be reached via
+    "Sign in with Google" from then on. The Admin-driven counterpart to
+    the automatic Student linking authenticate_with_google() does on its
+    own (see that function, and this module's docstring's "GOOGLE
+    SIGN-IN" section) -- this is the ONLY way a Teacher or Admin account
+    ever gets linked, since those roles never self-service.
+
+    Args:
+        user_id: The account to link.
+        google_email: The Google account's email address.
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if user_id does not exist.
+        ValidationError: if google_email fails validation.
+        DuplicateRecordError: if google_email is already linked to a
+            DIFFERENT account.
+    """
+    from modules.audit import build_audit_entry
+    from database.db_manager import execute_transaction
+
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+
+    existing = fetch_one("SELECT user_id, username, google_email FROM users WHERE user_id = ?", (user_id,))
+    if existing is None:
+        raise RecordNotFoundError(f"No user found with user_id {user_id}.")
+
+    google_email = validate_email(google_email)
+
+    already_linked = fetch_one(
+        "SELECT user_id FROM users WHERE google_email = ? AND user_id != ?", (google_email, user_id),
+    )
+    if already_linked is not None:
+        raise DuplicateRecordError("This Google email is already linked to another account.")
+
+    update_statement = (
+        "UPDATE users SET google_email = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+        (google_email, user_id),
+    )
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "users", str(user_id),
+        old_value={"google_email": existing["google_email"]}, new_value={"google_email": google_email},
+    )
+    execute_transaction([update_statement, audit_statement])
+    logger.info(
+        "Google account linked for user '%s' (user_id=%s) by user_id=%s.",
+        existing["username"], user_id, acting_user["user_id"],
+    )
+
+
+def unlink_google_account(user_id: int, acting_user: dict) -> None:
+    """
+    Reverse link_google_account(): clears google_email back to NULL, so
+    the account can only be reached by username/password again (e.g. if
+    a Teacher's Google account changed, or they no longer want Google
+    Sign-In available for this login).
+
+    Args:
+        user_id: The account to unlink.
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if user_id does not exist.
+        ValidationError: if the account has no Google account linked.
+    """
+    from modules.audit import build_audit_entry
+    from database.db_manager import execute_transaction
+
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+
+    existing = fetch_one("SELECT user_id, username, google_email FROM users WHERE user_id = ?", (user_id,))
+    if existing is None:
+        raise RecordNotFoundError(f"No user found with user_id {user_id}.")
+    if existing["google_email"] is None:
+        raise ValidationError(f"'{existing['username']}' has no Google account linked.")
+
+    update_statement = (
+        "UPDATE users SET google_email = NULL, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+        (user_id,),
+    )
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "users", str(user_id),
+        old_value={"google_email": existing["google_email"]}, new_value={"google_email": None},
+    )
+    execute_transaction([update_statement, audit_statement])
+    logger.info(
+        "Google account unlinked for user '%s' (user_id=%s) by user_id=%s.",
+        existing["username"], user_id, acting_user["user_id"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # STREAMLIT SESSION MANAGEMENT
 # ---------------------------------------------------------------------------
@@ -597,6 +887,61 @@ def login(username: str, password: str) -> dict:
     return user
 
 
+def try_google_login() -> bool:
+    """
+    If this browser already has a verified Google identity (from a
+    successful st.login("google") round-trip -- see app.py's
+    render_login_form()) but our OWN custom session (st.session_state)
+    doesn't know about it yet, map that identity to an app account via
+    authenticate_with_google() and start a normal session for it -- the
+    exact same session_state keys login() populates above, so every
+    existing page's require_login()/require_role() check keeps working
+    completely unchanged regardless of which login path was used.
+
+    Meant to be called once, unconditionally, at the very top of
+    app.py's main() on every single script rerun.
+
+    SAFE TO CALL EVEN WHEN GOOGLE SIGN-IN ISN'T CONFIGURED AT ALL:
+    st.user.is_logged_in raises AttributeError (confirmed directly
+    against Streamlit's own user_info.py source) when no [auth] section
+    exists anywhere in secrets.toml -- the normal state for local
+    development without Google credentials set up. That specific,
+    expected case is caught here and treated as "no Google identity to
+    check", not an error -- the rest of the app (username/password login)
+    is completely unaffected either way.
+
+    Returns:
+        True if a session was JUST started this call (the caller should
+        st.rerun() so every already-drawn widget reflects the new
+        session immediately). False if there was nothing to do --
+        already logged in some other way, no Google identity present, or
+        Google Sign-In isn't configured.
+    """
+    if get_current_user() is not None:
+        return False  # already logged in via some path -- nothing to do
+
+    try:
+        if not st.user.is_logged_in:
+            return False
+        google_email = st.user.email
+    except AttributeError:
+        return False  # Google Sign-In not configured in secrets.toml
+
+    try:
+        user = authenticate_with_google(google_email)
+    except AuthenticationError as error:
+        st.error(str(error))
+        if st.button("Log Out of Google", key="google_auth_error_logout"):
+            st.logout()
+            st.rerun()
+        st.stop()
+        return False  # unreachable -- st.stop() halts the script above
+
+    st.session_state[SESSION_KEY_USER] = user
+    st.session_state[SESSION_KEY_LAST_ACTIVITY] = datetime.now()
+    return True
+
+
 def logout() -> None:
     """
     End the current Streamlit session, clearing the logged-in user.
@@ -608,6 +953,21 @@ def logout() -> None:
 
     st.session_state.pop(SESSION_KEY_USER, None)
     st.session_state.pop(SESSION_KEY_LAST_ACTIVITY, None)
+
+    # Also clear Streamlit's own Google identity cookie, if any --
+    # otherwise try_google_login() would silently log the same
+    # Google-authenticated browser right back in on the very next
+    # rerun, defeating the point of clicking "Log Out". st.logout()
+    # itself never raises just because Google Sign-In was never used
+    # this session (confirmed directly against Streamlit's own
+    # user_info.py) -- only the is_logged_in READ can raise, when no
+    # [auth] section is configured at all, which is what the
+    # try/except below actually guards against.
+    try:
+        if st.user.is_logged_in:
+            st.logout()
+    except AttributeError:
+        pass
 
 
 def get_current_user() -> dict | None:
@@ -803,6 +1163,7 @@ def render_user_management_page() -> None:
             "Username": u["username"],
             "Role": u["role"],
             "Active": "Yes" if u["is_active"] else "No",
+            "Google Account": u["google_email"] or "Not linked",
             "Created": u["created_at"],
             "Last Login": u["last_login"] or "Never",
         }
@@ -851,6 +1212,33 @@ def render_user_management_page() -> None:
             st.success(f"Password for '{username_choice}' has been reset.")
         except ValidationError as error:
             st.error(str(error))
+
+    st.subheader("Link / unlink Google Sign-In")
+    st.caption(
+        "Students are linked automatically the first time they sign in with a Google "
+        "account matching their student record's email. Teacher and Admin accounts must "
+        "be linked here -- there is no self-service path for those roles."
+    )
+    if selected_user["google_email"]:
+        st.write(f"Currently linked to: **{selected_user['google_email']}**")
+        if st.button("Unlink Google Account"):
+            try:
+                unlink_google_account(selected_user["user_id"], current_user)
+                st.success(f"Google account unlinked for '{username_choice}'.")
+                st.rerun()
+            except (ValidationError, RecordNotFoundError) as error:
+                st.error(str(error))
+    else:
+        with st.form("link_google_form", clear_on_submit=True):
+            new_google_email = st.text_input("Google email to link")
+            link_submitted = st.form_submit_button("Link Google Account")
+        if link_submitted:
+            try:
+                link_google_account(selected_user["user_id"], new_google_email, current_user)
+                st.success(f"Google account linked for '{username_choice}'.")
+                st.rerun()
+            except (ValidationError, RecordNotFoundError, DuplicateRecordError) as error:
+                st.error(str(error))
 
     st.divider()
     st.subheader("Full Database Backup")

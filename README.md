@@ -8,7 +8,8 @@ classification, final-marks regression, and student segmentation).
 ## Tech stack
 
 Python 3.13 | Streamlit | SQLite (local) / Turso-libSQL (cloud, optional) |
-Pandas | NumPy | Plotly | scikit-learn | joblib | bcrypt | ReportLab | pytest
+Pandas | NumPy | Plotly | scikit-learn | joblib | bcrypt | ReportLab | pytest |
+Authlib (Google Sign-In via Streamlit's native `st.login`, optional)
 
 ## Features
 
@@ -43,6 +44,7 @@ Pandas | NumPy | Plotly | scikit-learn | joblib | bcrypt | ReportLab | pytest
 | 27 | Semester promotion tool (advance a whole semester's active students at once) | `modules/students.py` |
 | 28 | Institution-wide PDF Class Report (KPIs, rankings, alerts -- beyond one student's report card) | `utils/pdf_generator.py` |
 | 29 | In-app notifications bell (at-risk/attendance alerts, visible on every page) | `app.py` |
+| 30 | Google Sign-In (real OIDC identity via Streamlit's native `st.login`) | `modules/auth.py` |
 
 ### Beyond the original 13-module spec
 
@@ -51,7 +53,7 @@ to real usage:
 - **Cloud database (Turso/libSQL)**: `database/db_setup.py`'s
   `get_connection()` uses Turso when `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`
   are configured in Streamlit secrets, falling back to local SQLite
-  otherwise -- local development and all 168 tests stay fully offline.
+  otherwise -- local development and all 180 tests stay fully offline.
 - **Dark mode**: `.streamlit/config.toml` defines both `[theme.light]`
   and `[theme.dark]` -- Streamlit's own built-in Settings menu lets each
   user switch, no custom code involved.
@@ -81,9 +83,25 @@ to real usage:
   `students.promote_students()`, and
   `pdf_generator.generate_class_report()` respectively -- each reuses
   existing query functions rather than recomputing anything a second way.
-- **Google Sign-In**: prepared but not yet wired up -- requires OAuth
-  credentials from Google Cloud Console, which only the project owner can
-  create.
+- **Google Sign-In**: uses Streamlit's native `st.login`/`st.logout`/
+  `st.user` (a real OIDC identity from Google, not a hand-rolled OAuth
+  flow), configured via an `[auth]`/`[auth.google]` section in
+  `.streamlit/secrets.toml` (see "Google Sign-In setup" below).
+  `modules/auth.py`'s `authenticate_with_google()` follows the exact
+  same asymmetric trust rule as the rest of this app's signup design (see
+  that module's docstring): a Student is auto-registered the first time
+  their Google email matches an active student record's own email (the
+  same proof-of-identity rule `self_register_student()` already uses);
+  Teacher/Admin accounts are never auto-created this way and must be
+  linked to an existing account by an Admin, from the User Management
+  page. Fixing this also surfaced and fixed a real, pre-existing bug: a
+  Student's username (their roll_no) used to be re-validated against
+  `validate_username()`'s stricter, mismatched rules (minimum 4
+  characters) on top of `validate_roll_no()`'s own, more permissive
+  ones -- silently breaking both self-registration and Google Sign-In
+  for a roll_no shorter than 4 characters, including this project's own
+  real data (roll_no `"1"` and `"2"`). See `modules/auth.py`'s
+  `_insert_user_row()` for the fix.
 
 ## Project structure
 
@@ -139,7 +157,8 @@ student_performance_system/
 │   ├── test_at_risk_report.py
 │   ├── test_backup.py
 │   ├── test_promotion.py
-│   └── test_class_report.py
+│   ├── test_class_report.py
+│   └── test_google_auth.py
 └── logs/
     └── app.log                # created at runtime (gitignored)
 ```
@@ -198,13 +217,59 @@ provide one working login on a fresh install. A real deployment would
 need a forced password-change-on-first-login flow, which is out of scope
 here; change this password immediately after first login.
 
+### Google Sign-In setup (optional)
+
+The app works completely fine without this — it's an additional login
+method, not a replacement for username/password. To enable it:
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create
+   an OAuth 2.0 Client ID (Web application type). Note the **Client ID**
+   and **Client Secret**.
+2. Under that Client ID's **Authorized redirect URIs**, add:
+   - `http://localhost:8501/oauth2callback` (local development)
+   - `https://<your-app-name>.streamlit.app/oauth2callback` (your
+     deployed URL, once you have one)
+3. Add an `[auth]`/`[auth.google]` section to `.streamlit/secrets.toml`
+   (local) — **never commit this file**:
+   ```toml
+   [auth]
+   redirect_uri = "http://localhost:8501/oauth2callback"
+   cookie_secret = "a-long-random-string"  # e.g. python -c "import secrets; print(secrets.token_urlsafe(48))"
+
+   [auth.google]
+   client_id = "..."
+   client_secret = "..."
+   server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+   ```
+4. For the deployed app, paste the SAME secrets into Streamlit Community
+   Cloud's Settings → Secrets, but with `redirect_uri` set to your
+   deployed URL instead of `localhost`.
+5. Requires the `Authlib` package (see `requirements.txt`) —
+   `pip install -r requirements.txt` already covers it.
+
+**Who can actually sign in with Google**: a Student, automatically, the
+first time their Google account's email matches the email already on
+file for their roll number (the exact same rule
+`self_register_student()` uses for a typed-password signup). A Teacher
+or Admin account must be linked by an existing Admin first, from the
+User Management page's "Link / unlink Google Sign-In" section — there
+is no self-service path for those roles, consistent with every other
+account-creation rule in this app (see `modules/auth.py`'s module
+docstring).
+
+**If you ever paste real OAuth credentials into a chat, screenshot, or
+anywhere outside `.streamlit/secrets.toml`**, treat the Client Secret as
+compromised and regenerate it in Google Cloud Console once Sign-In is
+confirmed working — the Client ID alone is not sensitive, but the
+secret is.
+
 ## Running tests
 
 ```bash
 python -m pytest -v
 ```
 
-168 tests across thirteen files:
+180 tests across fourteen files:
 - `tests/test_validators.py` (58 tests) — every validation rule, including boundary values.
 - `tests/test_grades.py` (20 tests) — percentage/grade/SGPA/CGPA calculations, including deliberately adversarial edge cases like division-by-zero guards and off-by-one grade boundaries.
 - `tests/test_database.py` (13 tests) — CHECK/UNIQUE/FOREIGN KEY constraints and the `PRAGMA foreign_keys` setting itself, run against a throwaway temporary database (never the real `student_data.db`, and never the real Turso database either) created fresh for every test.
@@ -218,6 +283,7 @@ python -m pytest -v
 - `tests/test_backup.py` (4 tests) — every table present (even when empty), real data included, and `password_hash` excluded from both data and header.
 - `tests/test_promotion.py` (6 tests) — semester promotion moves only matching active students, leaves other semesters/inactive students untouched, and enforces Admin-only + the max-semester guard.
 - `tests/test_class_report.py` (3 tests) — structural PDF validity (a real PDF, no crash on an empty database, semester filter changes the output) — the report's actual numbers are already covered by the analytics/at-risk-report tests it reuses.
+- `tests/test_google_auth.py` (12 tests) — Google Sign-In's auto-registration/linking rules, including a regression test for the short-roll-no username bug described above.
 
 ## Database design
 

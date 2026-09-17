@@ -183,6 +183,7 @@ def create_tables(conn) -> None:
                                   CHECK (is_active IN (0, 1)),
                 must_change_password INTEGER NOT NULL DEFAULT 0
                                   CHECK (must_change_password IN (0, 1)),
+                google_email  TEXT,
                 created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_login    TEXT
@@ -525,25 +526,27 @@ def create_indexes(conn) -> None:
 def migrate_schema(conn) -> None:
     """
     Apply schema changes needed on a database that was created BEFORE a
-    given column existed.
+    given column existed -- currently users.must_change_password (see
+    modules/auth.py's forced-password-change feature) and
+    users.google_email (see modules/auth.py's Google Sign-In support).
 
     WHY THIS FUNCTION EXISTS, SEPARATE FROM create_tables(): every
     CREATE TABLE statement above uses "IF NOT EXISTS", which is a no-op
     the moment the table already exists -- it does NOT retroactively add
     a new column to a table that is already there. That is fine for a
-    brand-new install (the CREATE TABLE statement already includes the
-    new column), but this project's real, deployed Turso database already
-    has a "users" table from before "must_change_password" was added, and
-    it holds real accounts (including the live admin account) that must
-    not be touched or lost. This function's job is exactly that one
-    retrofit: add the column to a users table that predates it.
+    brand-new install (the CREATE TABLE statement already includes both
+    columns), but this project's real, deployed Turso database already
+    has a "users" table from before either column was added, and it
+    holds real accounts (including the live admin account) that must not
+    be touched or lost. This function's job is exactly that retrofit:
+    add whichever column a users table still predates.
 
     SAFE TO RUN EVERY TIME THE APP STARTS, on both a brand-new database
-    (where users already has the column, because create_tables() just
-    created it that way) and an old one (where it is missing): PRAGMA
-    table_info() is used to check whether the column is already there
-    before trying to add it, so this never runs the same ALTER TABLE
-    twice.
+    (where users already has both columns, because create_tables() just
+    created it that way) and an old one (where one or both are missing):
+    PRAGMA table_info() is used to check whether each column is already
+    there before trying to add it, so this never runs the same ALTER
+    TABLE twice.
 
     Args:
         conn: Whatever get_connection() returned.
@@ -561,6 +564,31 @@ def migrate_schema(conn) -> None:
             )
             conn.commit()
             logger.info("Migrated users table: added must_change_password column.")
+
+        if "google_email" not in existing_columns:
+            # No UNIQUE here -- confirmed directly against SQLite that
+            # ALTER TABLE ADD COLUMN cannot carry a UNIQUE constraint at
+            # all ("Cannot add a UNIQUE column"), on either backend. The
+            # CREATE UNIQUE INDEX statement right below enforces the
+            # exact same guarantee instead -- the standard way to
+            # retrofit uniqueness onto an existing table.
+            cursor.execute("ALTER TABLE users ADD COLUMN google_email TEXT")
+            conn.commit()
+            logger.info("Migrated users table: added google_email column.")
+
+        # Idempotent (IF NOT EXISTS) and run unconditionally, not only
+        # inside the "column was just added" branch above -- a fresh
+        # install's users table already has google_email (see
+        # create_tables()), but never gets this unique index unless it is
+        # created here too. NULL is treated as distinct from every other
+        # NULL for UNIQUE indexing purposes (confirmed directly against
+        # both backends), which is exactly what is needed: most accounts
+        # will never link a Google account at all, and none of those
+        # NULLs should collide with each other.
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_email ON users (google_email)"
+        )
+        conn.commit()
 
     except (sqlite3.Error, ValueError) as error:
         # See create_tables()'s comment above for why ValueError is caught

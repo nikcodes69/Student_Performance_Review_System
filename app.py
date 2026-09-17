@@ -34,6 +34,7 @@ safe message.
 """
 
 import streamlit as st
+from streamlit.errors import StreamlitAuthError
 
 import config
 from modules import analytics, assignments, attendance, audit, auth, ml_predictions, marks, student_portal, students, subjects
@@ -198,6 +199,19 @@ def render_login_form() -> None:
                     # str(error) is safe and appropriate to display directly.
                     st.error(str(error))
 
+            st.divider()
+            if st.button(":material/login: Sign in with Google", use_container_width=True):
+                try:
+                    st.login("google")
+                except StreamlitAuthError:
+                    # Only reachable if [auth.google] isn't configured in
+                    # secrets.toml (a misconfigured/undeployed setup) --
+                    # st.login() validates credentials itself before
+                    # redirecting anywhere (see modules/auth.py's
+                    # try_google_login() docstring for the same check
+                    # applied on the READ side).
+                    st.error("Google Sign-In is not configured on this deployment yet.")
+
         with signup_tab:
             st.caption(
                 "For students only. Your roll number must already exist in the "
@@ -335,6 +349,17 @@ def render_authenticated_view(user: dict) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Student Performance System", layout="wide")
+
+    # Checked on every single rerun, before anything else: if this
+    # browser already has a verified Google identity (from a completed
+    # "Sign in with Google" round-trip) but our own session doesn't know
+    # about it yet, map it to an app account and start a session for it.
+    # A no-op, cheaply, whenever there is no Google identity to check --
+    # see modules/auth.py's try_google_login() for the full reasoning,
+    # including why this is safe even when Google Sign-In isn't
+    # configured at all.
+    if auth.try_google_login():
+        st.rerun()
 
     if auth.is_session_valid():
         render_authenticated_view(auth.get_current_user())
