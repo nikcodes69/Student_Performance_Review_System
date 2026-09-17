@@ -152,13 +152,15 @@ PAGE_ICONS = {"Home": ":material/home:"} | {label: icon for label, icon, _roles,
 
 def render_login_form() -> None:
     """
-    Show the Log In / Sign Up screen and handle either submission.
+    Show the Log In / Sign Up screens and handle any of their submissions.
 
-    Sign Up here means STUDENT self-registration only -- see
+    TWO SEPARATE SIGN UP PATHS, NOT ONE GENERIC FORM -- see
     modules/auth.py's module docstring ("WHO CAN CREATE AN ACCOUNT") for
-    why Teacher and Admin accounts are deliberately never created through
-    a public-facing form like this one; those are created by an existing
-    Admin, on the User Management page, once logged in.
+    the full reasoning: "Sign Up (Students)" self-registers against an
+    EXISTING student record (matched by roll_no + email); "Sign Up
+    (Invited)" self-registers a Teacher/Admin, but ONLY for an email an
+    Admin has already pre-approved via invite_account(). Neither path
+    lets a visitor grant themselves a role nobody already vetted them for.
     """
     # A centered, fixed-width column instead of a full-page-wide form --
     # purely a layout choice (st.columns with unused side columns to
@@ -167,7 +169,9 @@ def render_login_form() -> None:
     with center:
         st.title(":material/school: Student Performance System")
 
-        login_tab, signup_tab = st.tabs(["Log In", "Sign Up (Students)"])
+        login_tab, signup_tab, invited_signup_tab = st.tabs(
+            ["Log In", "Sign Up (Students)", "Sign Up (Invited)"]
+        )
 
         with login_tab:
             st.caption("Sign in to continue")
@@ -246,6 +250,37 @@ def render_login_form() -> None:
                         #   didn't match what's on file for that roll_no.
                         # DuplicateRecordError: a login already exists for
                         #   this roll_no.
+                        st.error(str(error))
+
+        with invited_signup_tab:
+            st.caption(
+                "For Teachers and Admins an existing Admin has already invited. "
+                "Ask an administrator to invite your email first if you don't have "
+                "an account yet -- see User Management."
+            )
+            with st.form("invited_signup_form", clear_on_submit=True):
+                invited_email = st.text_input("Your invited email")
+                invited_username = st.text_input("Choose a Username")
+                invited_password = st.text_input(
+                    "Choose a Password", type="password", placeholder="At least 8 characters",
+                )
+                invited_confirm = st.text_input("Confirm Password", type="password")
+                invited_submitted = st.form_submit_button(
+                    "Create My Account", use_container_width=True,
+                )
+
+            if invited_submitted:
+                if invited_password != invited_confirm:
+                    st.error("Passwords do not match.")
+                else:
+                    try:
+                        auth.signup_invited_account(invited_email, invited_username, invited_password)
+                        st.success("Account created. Switch to the Log In tab to sign in.")
+                    except (ValidationError, RecordNotFoundError, DuplicateRecordError) as error:
+                        # RecordNotFoundError: no pending invite for this
+                        #   email (an Admin needs to invite it first).
+                        # ValidationError: bad username/password.
+                        # DuplicateRecordError: that username is already taken.
                         st.error(str(error))
 
 

@@ -81,6 +81,14 @@ ROLE_TEACHER = "teacher"
 ROLE_STUDENT = "student"
 VALID_ROLES = (ROLE_ADMIN, ROLE_TEACHER, ROLE_STUDENT)
 
+# Roles an Admin can pre-approve via modules/auth.py's invite_account()
+# (see database/db_setup.py's pending_accounts table) -- deliberately
+# excludes ROLE_STUDENT, which has its own, separate, stronger proof-of-
+# identity mechanism (matching an existing STUDENT RECORD's own email,
+# entered by staff -- see self_register_student()), not a simple email
+# allowlist.
+INVITABLE_ROLES = (ROLE_TEACHER, ROLE_ADMIN)
+
 # On a brand-new database there are no users yet, which is a chicken-and-
 # egg problem: an Admin is needed to create every other account, but
 # nobody can log in to create that first Admin. modules/auth.py solves
@@ -235,7 +243,7 @@ AUDIT_ACTIONS = (AUDIT_INSERT, AUDIT_UPDATE, AUDIT_SOFT_DELETE)
 # confusing, silently-wrong row in audit_log.
 AUDITED_TABLES = (
     "students", "subjects", "marks", "attendance", "semesters", "users",
-    "assignments", "teacher_subjects",
+    "assignments", "teacher_subjects", "pending_accounts",
 )
 
 # ---------------------------------------------------------------------------

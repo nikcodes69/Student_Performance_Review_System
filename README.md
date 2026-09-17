@@ -45,6 +45,7 @@ Authlib (Google Sign-In via Streamlit's native `st.login`, optional)
 | 28 | Institution-wide PDF Class Report (KPIs, rankings, alerts -- beyond one student's report card) | `utils/pdf_generator.py` |
 | 29 | In-app notifications bell (at-risk/attendance alerts, visible on every page) | `app.py` |
 | 30 | Google Sign-In (real OIDC identity via Streamlit's native `st.login`) | `modules/auth.py` |
+| 31 | Teacher/Admin self-service signup via an Admin-approved invite allowlist | `modules/auth.py` |
 
 ### Beyond the original 13-module spec
 
@@ -53,7 +54,7 @@ to real usage:
 - **Cloud database (Turso/libSQL)**: `database/db_setup.py`'s
   `get_connection()` uses Turso when `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`
   are configured in Streamlit secrets, falling back to local SQLite
-  otherwise -- local development and all 180 tests stay fully offline.
+  otherwise -- local development and all 194 tests stay fully offline.
 - **Dark mode**: `.streamlit/config.toml` defines both `[theme.light]`
   and `[theme.dark]` -- Streamlit's own built-in Settings menu lets each
   user switch, no custom code involved.
@@ -92,9 +93,12 @@ to real usage:
   that module's docstring): a Student is auto-registered the first time
   their Google email matches an active student record's own email (the
   same proof-of-identity rule `self_register_student()` already uses);
-  Teacher/Admin accounts are never auto-created this way and must be
-  linked to an existing account by an Admin, from the User Management
-  page. Fixing this also surfaced and fixed a real, pre-existing bug: a
+  Teacher/Admin accounts are NEVER auto-created directly via Google
+  (there is no well-defined username to derive from an arbitrary email,
+  unlike a Student's roll_no) -- they sign up once via the invite system
+  below, then link Google to that account either themselves
+  (`self_link_google_account()`) or via an Admin (`link_google_account()`).
+  Fixing this also surfaced and fixed a real, pre-existing bug: a
   Student's username (their roll_no) used to be re-validated against
   `validate_username()`'s stricter, mismatched rules (minimum 4
   characters) on top of `validate_roll_no()`'s own, more permissive
@@ -102,6 +106,17 @@ to real usage:
   for a roll_no shorter than 4 characters, including this project's own
   real data (roll_no `"1"` and `"2"`). See `modules/auth.py`'s
   `_insert_user_row()` for the fix.
+- **Teacher/Admin self-service signup, via an Admin-approved allowlist**:
+  an Admin pre-approves an email for a specific role
+  (`invite_account()` -- see `database/db_setup.py`'s `pending_accounts`
+  table), and that person then creates their own account (username,
+  password) from the login page's "Sign Up (Invited)" tab
+  (`signup_invited_account()`) -- the same shape of trust rule as Student
+  self-registration, just using an allowlist instead of an existing
+  academic record, since staff have no equivalent to a roll_no. An Admin
+  can still create a Teacher/Admin account directly by hand instead, on
+  User Management, exactly as before -- this is an additional path, not
+  a replacement.
 
 ## Project structure
 
@@ -158,7 +173,8 @@ student_performance_system/
 │   ├── test_backup.py
 │   ├── test_promotion.py
 │   ├── test_class_report.py
-│   └── test_google_auth.py
+│   ├── test_google_auth.py
+│   └── test_invited_signup.py
 └── logs/
     └── app.log                # created at runtime (gitignored)
 ```
@@ -251,11 +267,35 @@ method, not a replacement for username/password. To enable it:
 first time their Google account's email matches the email already on
 file for their roll number (the exact same rule
 `self_register_student()` uses for a typed-password signup). A Teacher
-or Admin account must be linked by an existing Admin first, from the
-User Management page's "Link / unlink Google Sign-In" section — there
-is no self-service path for those roles, consistent with every other
-account-creation rule in this app (see `modules/auth.py`'s module
-docstring).
+or Admin account is never auto-created via Google directly — they first
+sign up via an Admin-approved invite (see "Teacher/Admin invited
+signup" below), then link Google to that account themselves (Change
+Password page's "Google Sign-In" section) or have an Admin link it for
+them (User Management's "Link / unlink Google Sign-In" section). Either
+way, Google Sign-In only ever reaches an account that already exists —
+consistent with every other account-creation rule in this app (see
+`modules/auth.py`'s module docstring).
+
+### Teacher/Admin invited signup
+
+Unlike Students (who self-register against an existing academic
+record), Teachers and Admins have no equivalent institutional record to
+match against. Instead:
+
+1. An existing Admin pre-approves an email for a specific role, from
+   User Management's "Invite a Teacher / Admin to self-register"
+   section (`invite_account()`). This does not send an email — tell the
+   invited person directly.
+2. That person creates their own account (username + password) from the
+   login page's "Sign Up (Invited)" tab (`signup_invited_account()`),
+   using the exact email they were invited with. The invite is consumed
+   the moment they sign up — it can't be reused.
+3. They can then link Google Sign-In to that account themselves (Change
+   Password page), or an Admin can link it for them.
+
+An Admin can still create a Teacher/Admin account directly by hand
+instead (User Management's "Create a new account" section) — the invite
+system is an additional, self-service path, not a replacement.
 
 **If you ever paste real OAuth credentials into a chat, screenshot, or
 anywhere outside `.streamlit/secrets.toml`**, treat the Client Secret as
@@ -269,7 +309,7 @@ secret is.
 python -m pytest -v
 ```
 
-180 tests across fourteen files:
+194 tests across fifteen files:
 - `tests/test_validators.py` (58 tests) — every validation rule, including boundary values.
 - `tests/test_grades.py` (20 tests) — percentage/grade/SGPA/CGPA calculations, including deliberately adversarial edge cases like division-by-zero guards and off-by-one grade boundaries.
 - `tests/test_database.py` (13 tests) — CHECK/UNIQUE/FOREIGN KEY constraints and the `PRAGMA foreign_keys` setting itself, run against a throwaway temporary database (never the real `student_data.db`, and never the real Turso database either) created fresh for every test.
@@ -284,11 +324,12 @@ python -m pytest -v
 - `tests/test_promotion.py` (6 tests) — semester promotion moves only matching active students, leaves other semesters/inactive students untouched, and enforces Admin-only + the max-semester guard.
 - `tests/test_class_report.py` (3 tests) — structural PDF validity (a real PDF, no crash on an empty database, semester filter changes the output) — the report's actual numbers are already covered by the analytics/at-risk-report tests it reuses.
 - `tests/test_google_auth.py` (12 tests) — Google Sign-In's auto-registration/linking rules, including a regression test for the short-roll-no username bug described above.
+- `tests/test_invited_signup.py` (14 tests) — Teacher/Admin invite/revoke/signup, self-service Google linking, and a regression guard confirming Google Sign-In never auto-creates a Teacher/Admin account even when a pending invite exists.
 
 ## Database design
 
-9 tables (`users`, `students`, `subjects`, `marks`, `attendance`,
-`assignments`, `teacher_subjects`, `semesters`, `audit_log`), all normalised to **3NF**: atomic columns
+10 tables (`users`, `students`, `subjects`, `marks`, `attendance`,
+`assignments`, `teacher_subjects`, `pending_accounts`, `semesters`, `audit_log`), all normalised to **3NF**: atomic columns
 (1NF), every column depends on the whole primary key including composite
 keys like `semesters(roll_no, semester)` (2NF), and no column depends on
 another non-key column instead of the key (3NF) — see the extensive

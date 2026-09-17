@@ -23,10 +23,12 @@ This file is split into two clearly separate halves:
 ======================================================================
 WHO CAN CREATE AN ACCOUNT, AND HOW -- A DELIBERATE, ASYMMETRIC DESIGN
 ======================================================================
-This app does NOT offer one universal "sign up" form for every role.
-That would mean any visitor to a publicly deployed instance of this app
-could grant themselves an Admin account -- full access to every
-student's records, the audit log, everything. Instead:
+This app does NOT offer one universal "sign up" form where a visitor
+just picks any role. That would mean any visitor to a publicly deployed
+instance of this app could grant themselves an Admin account -- full
+access to every student's records, the audit log, everything. Every
+signup path below still requires proof tied back to something an Admin
+(or, for Students, institutional staff) already put on record FIRST:
 
   - STUDENT: self-service, via self_register_student() below, but only
     to CLAIM A LOGIN for a roll_no that an Admin/Teacher already entered
@@ -40,13 +42,17 @@ student's records, the audit log, everything. Instead:
     cannot claim an arbitrary roll_no just by guessing a number; they
     would also need to know the exact email the institution has on record.
 
-  - TEACHER and ADMIN: never self-service. create_user() (below) is only
-    ever called two ways: by an existing Admin, through
-    render_user_management_page() at the bottom of this file, or by
-    ensure_default_admin_exists()'s one-time bootstrap script
-    (`python -m modules.auth`) when NO admin exists at all yet. There is
-    no page anywhere in this app where a visitor can choose "Teacher" or
-    "Admin" for themselves.
+  - TEACHER and ADMIN: self-service, via signup_invited_account() below,
+    but ONLY for an email an existing Admin has already pre-approved via
+    invite_account() (see database/db_setup.py's pending_accounts table).
+    A visitor cannot invite themselves -- invite_account() is Admin-only,
+    from render_user_management_page(). This is the SAME shape of trust
+    rule as Student signup (prove you're the one the institution already
+    vetted), just using an Admin-maintained allowlist instead of an
+    existing academic record, since there is no equivalent "roll_no" for
+    staff. An Admin can also still create a Teacher/Admin account
+    directly, by hand, via create_user() -- invite-based self-service is
+    an additional path, not a replacement for that one.
 
 ======================================================================
 GOOGLE SIGN-IN -- THE SAME ASYMMETRIC RULE, VIA A DIFFERENT PROOF OF IDENTITY
@@ -60,18 +66,19 @@ a typed password:
     record's own email (the same match self_register_student() already
     requires) gets a login auto-created on the spot, the first time they
     sign in with that Google account -- no password to choose at all,
-    since Google already proved who they are. A student who already has
-    a username/password login can also be LINKED to their Google account
-    afterwards (see link_google_account() below), letting either method
-    work from then on.
+    since Google already proved who they are.
 
-  - TEACHER and ADMIN: never auto-created this way, for the identical
-    reason they are never self-service through the signup form -- only
-    an existing Admin can link a Google email to an already-existing
-    Teacher/Admin account (link_google_account(), used from
-    render_user_management_page()). There is no path where signing in
-    with a Google account grants Teacher or Admin access to someone who
-    does not already have it.
+  - TEACHER and ADMIN: NEVER auto-created via Google directly -- unlike a
+    Student's roll_no, there is no well-defined username to derive from
+    an arbitrary email address, so Google Sign-In alone is not enough to
+    create one of these accounts. A pre-approved Teacher/Admin instead
+    signs up once via signup_invited_account() (choosing their own
+    username there), and can then link their Google account to it
+    afterwards -- either themselves, via self_link_google_account() (any
+    logged-in user can link their OWN account, no Admin needed), or by
+    an Admin, via link_google_account() (render_user_management_page()).
+    Either way, Google Sign-In only ever reaches an account that already
+    exists; it can never be the FIRST step for a Teacher or Admin.
 """
 
 import secrets
@@ -347,6 +354,168 @@ def self_register_student(roll_no: str, email: str, password: str) -> int:
     return user_id
 
 
+def invite_account(email: str, role: str, acting_user: dict) -> None:
+    """
+    Pre-approve an email to self-register as a Teacher or Admin -- see
+    database/db_setup.py's pending_accounts table for the full reasoning
+    behind this mechanism. Admin-only, from render_user_management_page()
+    below. Does not send an email itself (this project has no email/SMTP
+    integration -- the same deliberate scope limit self_register_student()
+    already documents for students); the Admin is expected to tell the
+    invited person directly.
+
+    Args:
+        email: The email address being pre-approved.
+        role: config.ROLE_TEACHER or config.ROLE_ADMIN (never
+            config.ROLE_STUDENT -- see config.INVITABLE_ROLES).
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        ValidationError: if email fails validation, or role is not one
+            of config.INVITABLE_ROLES.
+        DuplicateRecordError: if this email is already invited.
+    """
+    from modules.audit import build_audit_entry
+    from database.db_manager import execute_transaction
+
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+
+    email = validate_email(email)
+    if role not in config.INVITABLE_ROLES:
+        raise ValidationError(f"Role must be one of {config.INVITABLE_ROLES}.")
+
+    existing = fetch_one("SELECT email FROM pending_accounts WHERE email = ?", (email,))
+    if existing is not None:
+        raise DuplicateRecordError(f"'{email}' is already invited.")
+
+    insert_statement = (
+        "INSERT INTO pending_accounts (email, role, invited_by) VALUES (?, ?, ?)",
+        (email, role, acting_user["user_id"]),
+    )
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_INSERT, "pending_accounts", email,
+        old_value=None, new_value={"email": email, "role": role},
+    )
+    execute_transaction([insert_statement, audit_statement])
+    logger.info("'%s' invited as '%s' by user_id=%s.", email, role, acting_user["user_id"])
+
+
+def revoke_invite(email: str, acting_user: dict) -> None:
+    """
+    Cancel a pending invite before it's used. Admin-only.
+
+    Args:
+        email: The invited email to revoke.
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if no pending invite exists for this email.
+    """
+    from modules.audit import build_audit_entry
+    from database.db_manager import execute_transaction
+
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+
+    email = validate_email(email)
+    existing = fetch_one("SELECT email, role FROM pending_accounts WHERE email = ?", (email,))
+    if existing is None:
+        raise RecordNotFoundError(f"No pending invite found for '{email}'.")
+
+    delete_statement = ("DELETE FROM pending_accounts WHERE email = ?", (email,))
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "pending_accounts", email,
+        old_value={"email": email, "role": existing["role"]}, new_value=None,
+    )
+    execute_transaction([delete_statement, audit_statement])
+    logger.info("Invite for '%s' revoked by user_id=%s.", email, acting_user["user_id"])
+
+
+def list_pending_invites() -> list[dict]:
+    """
+    Every pending (unused) invite, most recent first. Not permission-
+    gated itself -- consistent with every other list_* function in this
+    project (see modules/students.py's module docstring); the real gate
+    is render_user_management_page() calling require_role(ROLE_ADMIN).
+
+    Returns:
+        A list of dicts: email, role, invited_by (the inviting Admin's
+        username), created_at.
+    """
+    return fetch_all(
+        "SELECT p.email, p.role, u.username AS invited_by, p.created_at "
+        "FROM pending_accounts p JOIN users u ON p.invited_by = u.user_id "
+        "ORDER BY p.created_at DESC"
+    )
+
+
+def signup_invited_account(email: str, username: str, password: str) -> int:
+    """
+    Let a pre-approved Teacher/Admin claim their account -- the
+    Teacher/Admin counterpart to self_register_student(), gated by
+    invite_account() above rather than an existing student record. See
+    this module's docstring's "WHO CAN CREATE AN ACCOUNT" section for how
+    this keeps the same security guarantee (nobody can grant themselves
+    Teacher/Admin access; only an Admin who already invited that exact
+    email can).
+
+    Args:
+        email: The invited email address.
+        username: The desired login username (freely chosen here, unlike
+            a Student's -- there is no roll_no to derive it from).
+        password: The desired plaintext password.
+
+    Returns:
+        The new user account's user_id.
+
+    Raises:
+        RecordNotFoundError: if no pending invite exists for this email.
+        ValidationError: if username or password fails validation.
+        DuplicateRecordError: if the username is already taken.
+    """
+    from database.db_manager import execute_transaction
+
+    email = validate_email(email)
+    invite = fetch_one("SELECT role FROM pending_accounts WHERE email = ?", (email,))
+    if invite is None:
+        raise RecordNotFoundError(
+            f"No pending invite found for '{email}'. Ask an administrator to invite you first."
+        )
+
+    username = validate_username(username)
+    password = validate_password(password)
+
+    existing_user = fetch_one("SELECT user_id FROM users WHERE username = ?", (username,))
+    if existing_user is not None:
+        raise DuplicateRecordError(f"Username '{username}' is already taken.")
+
+    # No audit_log entry for the account-creation event itself, for the
+    # same reason self_register_student() has never written one: an
+    # audit_log row's user_id is NOT NULL and foreign-keys to an
+    # EXISTING account (see database/db_setup.py's audit_log table) --
+    # but the actor here IS the account being created, whose user_id
+    # does not exist until this very INSERT completes. There is no
+    # earlier "acting user" to attribute the row to.
+    password_hash = hash_password(password)
+    insert_statement = (
+        "INSERT INTO users (username, password_hash, role, must_change_password, google_email) "
+        "VALUES (?, ?, ?, ?, ?)",
+        # force_password_change=False (0): they just chose their own
+        # password, same reasoning as self_register_student().
+        (username, password_hash, invite["role"], 0, None),
+    )
+    delete_invite_statement = ("DELETE FROM pending_accounts WHERE email = ?", (email,))
+    results = execute_transaction([insert_statement, delete_invite_statement])
+    user_id = results[0]
+
+    logger.info(
+        "'%s' signed up as '%s' (user_id=%s) via invite from '%s'.",
+        username, invite["role"], user_id, email,
+    )
+    return user_id
+
+
 def authenticate(username: str, password: str) -> dict:
     """
     Verify a username/password pair and return the matching user's
@@ -452,10 +621,18 @@ def authenticate_with_google(google_email: str) -> dict:
             "SELECT roll_no FROM students WHERE email = ? AND is_active = 1", (google_email,),
         )
         if student_row is None:
+            invite = fetch_one("SELECT role FROM pending_accounts WHERE email = ?", (google_email,))
+            if invite is not None:
+                raise AuthenticationError(
+                    f"You have a pending invite as {invite['role']}, but Google Sign-In can't "
+                    "create that account automatically -- use the \"Sign Up (Invited)\" tab to "
+                    "choose a username and password first, then you can link your Google account "
+                    "from the Change Password page."
+                )
             raise AuthenticationError(
                 "No account is linked to this Google email. Students: make sure this is "
                 "the email address on file for your roll number, or contact an administrator. "
-                "Teachers/Admins: ask an administrator to link your Google account."
+                "Teachers/Admins: ask an administrator to invite you, or to link your Google account."
             )
 
         roll_no = student_row["roll_no"]
@@ -768,22 +945,18 @@ def admin_reset_password(user_id: int, new_password: str, acting_user: dict) -> 
     )
 
 
-def link_google_account(user_id: int, google_email: str, acting_user: dict) -> None:
+def _link_google_account_row(user_id: int, google_email: str, actor_user_id: int) -> str:
     """
-    Link an EXISTING account to a Google email, so it can be reached via
-    "Sign in with Google" from then on. The Admin-driven counterpart to
-    the automatic Student linking authenticate_with_google() does on its
-    own (see that function, and this module's docstring's "GOOGLE
-    SIGN-IN" section) -- this is the ONLY way a Teacher or Admin account
-    ever gets linked, since those roles never self-service.
+    Shared logic behind link_google_account() (Admin, any account) and
+    self_link_google_account() (any logged-in user, their OWN account
+    only) below -- both need the identical duplicate-check + UPDATE +
+    audit entry, differing only in WHO is allowed to call it for WHICH
+    user_id, which each caller enforces separately before this runs.
 
-    Args:
-        user_id: The account to link.
-        google_email: The Google account's email address.
-        acting_user: The logged-in Admin performing this action.
+    Returns:
+        The linked account's username (for the caller's own log message).
 
     Raises:
-        AuthorizationError: if acting_user's role is not Admin.
         RecordNotFoundError: if user_id does not exist.
         ValidationError: if google_email fails validation.
         DuplicateRecordError: if google_email is already linked to a
@@ -791,8 +964,6 @@ def link_google_account(user_id: int, google_email: str, acting_user: dict) -> N
     """
     from modules.audit import build_audit_entry
     from database.db_manager import execute_transaction
-
-    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
 
     existing = fetch_one("SELECT user_id, username, google_email FROM users WHERE user_id = ?", (user_id,))
     if existing is None:
@@ -811,14 +982,64 @@ def link_google_account(user_id: int, google_email: str, acting_user: dict) -> N
         (google_email, user_id),
     )
     audit_statement = build_audit_entry(
-        acting_user["user_id"], config.AUDIT_UPDATE, "users", str(user_id),
+        actor_user_id, config.AUDIT_UPDATE, "users", str(user_id),
         old_value={"google_email": existing["google_email"]}, new_value={"google_email": google_email},
     )
     execute_transaction([update_statement, audit_statement])
+    return existing["username"]
+
+
+def link_google_account(user_id: int, google_email: str, acting_user: dict) -> None:
+    """
+    Link an EXISTING account to a Google email, so it can be reached via
+    "Sign in with Google" from then on. The Admin-driven counterpart to
+    self_link_google_account() below (any logged-in user linking their
+    OWN account) -- this is how an Admin links SOMEONE ELSE's account,
+    e.g. right after inviting a Teacher/Admin, or if that person would
+    rather not do it themselves.
+
+    Args:
+        user_id: The account to link.
+        google_email: The Google account's email address.
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if user_id does not exist.
+        ValidationError: if google_email fails validation.
+        DuplicateRecordError: if google_email is already linked to a
+            DIFFERENT account.
+    """
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+    username = _link_google_account_row(user_id, google_email, acting_user["user_id"])
     logger.info(
         "Google account linked for user '%s' (user_id=%s) by user_id=%s.",
-        existing["username"], user_id, acting_user["user_id"],
+        username, user_id, acting_user["user_id"],
     )
+
+
+def self_link_google_account(acting_user: dict, google_email: str) -> None:
+    """
+    Let ANY logged-in user link their OWN account to a Google email
+    themselves, without needing an Admin -- the self-service counterpart
+    to link_google_account() above. Being logged in already proves they
+    own this account (the same standard change_password() uses for a
+    self-service password change), so no separate Admin approval is
+    needed to link one MORE way of reaching an account they can already
+    reach -- this can never grant a new role or a new account to anyone,
+    only expand how an already-authenticated one is signed into.
+
+    Args:
+        acting_user: The logged-in user linking their own account.
+        google_email: The Google account's email address.
+
+    Raises:
+        ValidationError: if google_email fails validation.
+        DuplicateRecordError: if google_email is already linked to a
+            DIFFERENT account.
+    """
+    username = _link_google_account_row(acting_user["user_id"], google_email, acting_user["user_id"])
+    logger.info("User '%s' (user_id=%s) linked their own Google account.", username, acting_user["user_id"])
 
 
 def unlink_google_account(user_id: int, acting_user: dict) -> None:
@@ -1117,14 +1338,41 @@ def render_change_password_page(forced: bool = False) -> None:
             except (AuthenticationError, ValidationError) as error:
                 st.error(str(error))
 
+    if not forced:
+        st.divider()
+        st.subheader("Google Sign-In")
+        current_google_email = fetch_one(
+            "SELECT google_email FROM users WHERE user_id = ?", (user["user_id"],),
+        )["google_email"]
+
+        if current_google_email:
+            st.write(f"Your account is linked to: **{current_google_email}**")
+            st.caption("Contact an administrator to unlink it.")
+        else:
+            st.caption(
+                "Link your account to a Google email so you can sign in with Google "
+                "instead of your username/password."
+            )
+            with st.form("self_link_google_form", clear_on_submit=True):
+                link_email = st.text_input("Your Google email")
+                link_submitted = st.form_submit_button("Link Google Account")
+            if link_submitted:
+                try:
+                    self_link_google_account(user, link_email)
+                    st.success("Google account linked.")
+                    st.rerun()
+                except (ValidationError, DuplicateRecordError) as error:
+                    st.error(str(error))
+
 
 def render_user_management_page() -> None:
     """
     Streamlit page: Admin creates Teacher/Admin/Student login accounts by
-    hand, and can deactivate/reactivate existing ones. Admin-only -- this
-    is deliberately the ONLY way a Teacher or Admin account ever comes
-    into existence (besides the one-time bootstrap script) -- see the
-    module docstring's "WHO CAN CREATE AN ACCOUNT" section.
+    hand, invites a Teacher/Admin to self-register instead, and can
+    deactivate/reactivate existing ones. Admin-only -- see the module
+    docstring's "WHO CAN CREATE AN ACCOUNT" section for how this page's
+    two Teacher/Admin creation paths (hand-created here, vs. an invited
+    self-signup on the login page) both trace back to an Admin action.
     """
     current_user = require_role(config.ROLE_ADMIN)
 
@@ -1132,7 +1380,7 @@ def render_user_management_page() -> None:
 
     st.subheader("Create a new account")
     st.caption(
-        "Use this to create Teacher and Admin accounts. Students should "
+        "Use this to create a Teacher/Admin account directly by hand. Students should "
         "normally use the Sign Up tab on the login page themselves -- see "
         "there first if you're creating a login for an existing student."
     )
@@ -1149,6 +1397,50 @@ def render_user_management_page() -> None:
             st.rerun()
         except (ValidationError, DuplicateRecordError) as error:
             st.error(str(error))
+
+    st.divider()
+    st.subheader("Invite a Teacher / Admin to self-register")
+    st.caption(
+        "Pre-approve an email so that person can create their own account (username, "
+        "password, and optionally Google Sign-In) from the login page's \"Sign Up "
+        "(Invited)\" tab, instead of you creating it for them above. Tell them directly -- "
+        "this does not send an email."
+    )
+    with st.form("invite_account_form", clear_on_submit=True):
+        invite_email = st.text_input("Email to invite")
+        invite_role = st.selectbox("Role", options=config.INVITABLE_ROLES, key="invite_role")
+        invite_submitted = st.form_submit_button("Send Invite")
+
+    if invite_submitted:
+        try:
+            invite_account(invite_email, invite_role, current_user)
+            st.success(f"'{invite_email}' invited as {invite_role}.")
+            st.rerun()
+        except (ValidationError, DuplicateRecordError) as error:
+            st.error(str(error))
+
+    pending_invites = list_pending_invites()
+    if pending_invites:
+        st.write("**Pending invites**")
+        invite_display_rows = [
+            {
+                "Email": inv["email"], "Role": inv["role"],
+                "Invited By": inv["invited_by"], "Invited On": inv["created_at"],
+            }
+            for inv in pending_invites
+        ]
+        st.dataframe(invite_display_rows, use_container_width=True, hide_index=True)
+
+        revoke_email_choice = st.selectbox(
+            "Revoke an invite", options=[inv["email"] for inv in pending_invites],
+        )
+        if st.button("Revoke Selected Invite"):
+            try:
+                revoke_invite(revoke_email_choice, current_user)
+                st.success(f"Invite for '{revoke_email_choice}' revoked.")
+                st.rerun()
+            except RecordNotFoundError as error:
+                st.error(str(error))
 
     st.divider()
     st.subheader("Existing accounts")

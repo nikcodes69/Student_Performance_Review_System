@@ -390,6 +390,40 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # pending_accounts
+        # ---------------------------------------------------------------
+        # An Admin-maintained allowlist: "this email is pre-approved to
+        # self-register as a Teacher or Admin" (see modules/auth.py's
+        # invite_account()). This is what makes Teacher/Admin signup safe
+        # to offer as a public form at all -- without it, ANY visitor
+        # could grant themselves Teacher/Admin access, exactly the
+        # security hole this project's signup design has deliberately
+        # avoided since it was first built (see modules/auth.py's module
+        # docstring). email is the PRIMARY KEY (not a surrogate id) since
+        # "is this email currently invited" is the only lookup this table
+        # ever needs -- the same reasoning as students.roll_no/
+        # subjects.subject_code being natural keys (see those tables'
+        # comments).
+        #
+        # A row here is consumed exactly once: the moment someone signs
+        # up (by password, via modules/auth.py's signup_invited_account(),
+        # or automatically via Google Sign-In, via
+        # authenticate_with_google()) with a matching email, the account
+        # is created AND this row is deleted in the same breath -- there
+        # is no "used" flag, because a consumed invite has nothing left
+        # to represent; the resulting user account IS the record of it.
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS pending_accounts (
+                email        TEXT PRIMARY KEY,
+                role         TEXT NOT NULL
+                                 CHECK (role IN ({_quoted_list(config.INVITABLE_ROLES)})),
+                invited_by   INTEGER NOT NULL,
+                created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (invited_by) REFERENCES users (user_id)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # semesters
         # ---------------------------------------------------------------
         # This table has no single-column primary key -- (roll_no,
