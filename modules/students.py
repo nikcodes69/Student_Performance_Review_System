@@ -43,6 +43,7 @@ from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth
 from modules.audit import build_audit_entry
 from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
+from utils.bulk_import import render_bulk_import
 from utils.logger import get_logger
 from utils.table_view import render_data_table
 from utils.validators import (
@@ -405,6 +406,53 @@ def list_students(
     return [dict(row) for row in rows]
 
 
+def _validate_bulk_student_row(row: dict) -> None:
+    """
+    Validate one row of a bulk student import, run during the PREVIEW
+    step (before anything is committed) -- see utils/bulk_import.py's
+    module docstring for why previewing matters here. Reuses the exact
+    same utils/validators.py functions AND the "does this roll_no
+    already exist" check create_student() itself performs, so a row from
+    a spreadsheet is held to identical rules as one typed into the "Add
+    New Student" form by hand -- just checked here EARLY, so the preview
+    can already show "already exists" instead of only discovering that
+    at commit time.
+
+    Args:
+        row: One row from the uploaded file, as a dict of column name ->
+            string cell value (every value arrives as text -- see
+            utils.bulk_import.parse_uploaded_file()'s docstring for why).
+
+    Raises:
+        ValidationError: if any field is missing, malformed, or not the
+            expected type (e.g. "semester" is not a whole number).
+        DuplicateRecordError: if roll_no already belongs to an existing
+            student record.
+    """
+    roll_no = validate_roll_no(row.get("roll_no", ""))
+    validate_name(row.get("name", ""))
+
+    try:
+        semester = int(row.get("semester", ""))
+    except (TypeError, ValueError):
+        raise ValidationError(f"Semester must be a whole number, got '{row.get('semester')}'.")
+    validate_semester(semester)
+
+    validate_branch(row.get("branch", ""))
+    validate_email(row.get("email", ""))
+    validate_phone(row.get("phone", ""))
+
+    try:
+        admission_year = int(row.get("admission_year", ""))
+    except (TypeError, ValueError):
+        raise ValidationError(f"Admission year must be a whole number, got '{row.get('admission_year')}'.")
+    validate_admission_year(admission_year)
+
+    existing = fetch_one("SELECT roll_no FROM students WHERE roll_no = ?", (roll_no,))
+    if existing is not None:
+        raise DuplicateRecordError(f"A student with roll number '{roll_no}' already exists.")
+
+
 # ---------------------------------------------------------------------------
 # STREAMLIT PAGE
 # ---------------------------------------------------------------------------
@@ -449,6 +497,18 @@ def render_students_page() -> None:
                     st.rerun()
                 except (ValidationError, DuplicateRecordError) as error:
                     st.error(str(error))
+
+        with st.expander("Bulk Import Students (CSV/Excel)"):
+            render_bulk_import(
+                key_prefix="students_import",
+                required_columns=("roll_no", "name", "semester", "branch", "email", "phone", "admission_year"),
+                key_column="roll_no",
+                validate_row=_validate_bulk_student_row,
+                commit_row=lambda row: create_student(
+                    row["roll_no"], row["name"], int(row["semester"]), row["branch"],
+                    row["email"], row["phone"], int(row["admission_year"]), user,
+                ),
+            )
 
     st.subheader("Student List")
     show_inactive = st.checkbox("Show deactivated students", value=False) if is_admin else False

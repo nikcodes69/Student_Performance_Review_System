@@ -21,6 +21,7 @@ import config
 from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth
 from modules.audit import build_audit_entry
+from utils.bulk_import import render_bulk_import
 from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.table_view import render_data_table
@@ -354,6 +355,53 @@ def list_subjects(semester: int | None = None, include_inactive: bool = False) -
     return [dict(row) for row in rows]
 
 
+def _validate_bulk_subject_row(row: dict) -> None:
+    """
+    Validate one row of a bulk subject import, run during the PREVIEW
+    step -- see modules/students.py's _validate_bulk_student_row() for
+    the identical reasoning (and utils/bulk_import.py's module docstring
+    for why previewing before committing matters). Reuses the exact same
+    validators AND the "does this subject_code already exist" check
+    create_subject() itself performs.
+
+    Args:
+        row: One row from the uploaded file, as a dict of column name ->
+            string cell value.
+
+    Raises:
+        ValidationError: if any field is missing, malformed, or not the
+            expected type.
+        DuplicateRecordError: if subject_code already belongs to an
+            existing subject.
+    """
+    subject_code = validate_subject_code(row.get("subject_code", ""))
+    validate_subject_name(row.get("name", ""))
+
+    try:
+        semester = int(row.get("semester", ""))
+    except (TypeError, ValueError):
+        raise ValidationError(f"Semester must be a whole number, got '{row.get('semester')}'.")
+    validate_semester(semester)
+
+    try:
+        credits = int(row.get("credits", ""))
+    except (TypeError, ValueError):
+        raise ValidationError(f"Credits must be a whole number, got '{row.get('credits')}'.")
+    validate_credits(credits)
+
+    try:
+        max_internal = int(row.get("max_internal", "") or 0)
+        max_external = int(row.get("max_external", "") or 0)
+        max_practical = int(row.get("max_practical", "") or 0)
+    except (TypeError, ValueError):
+        raise ValidationError("max_internal/max_external/max_practical must all be whole numbers.")
+    validate_max_marks_configuration(max_internal, max_external, max_practical)
+
+    existing = fetch_one("SELECT subject_code FROM subjects WHERE subject_code = ?", (subject_code,))
+    if existing is not None:
+        raise DuplicateRecordError(f"A subject with code '{subject_code}' already exists.")
+
+
 # ---------------------------------------------------------------------------
 # STREAMLIT PAGE
 # ---------------------------------------------------------------------------
@@ -400,6 +448,22 @@ def render_subjects_page() -> None:
                     st.rerun()
                 except (ValidationError, DuplicateRecordError) as error:
                     st.error(str(error))
+
+        with st.expander("Bulk Import Subjects (CSV/Excel)"):
+            render_bulk_import(
+                key_prefix="subjects_import",
+                required_columns=(
+                    "subject_code", "name", "semester", "credits",
+                    "max_internal", "max_external", "max_practical",
+                ),
+                key_column="subject_code",
+                validate_row=_validate_bulk_subject_row,
+                commit_row=lambda row: create_subject(
+                    row["subject_code"], row["name"], int(row["semester"]), int(row["credits"]),
+                    int(row["max_internal"] or 0), int(row["max_external"] or 0), int(row["max_practical"] or 0),
+                    user,
+                ),
+            )
 
     st.subheader("Subject List")
     show_inactive = st.checkbox("Show deactivated subjects", value=False) if is_admin else False
