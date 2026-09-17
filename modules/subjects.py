@@ -15,7 +15,6 @@ still has to validate the FULL resulting combination, not just whichever
 one field changed -- see the comment inside update_subject() for how.
 """
 
-import pandas as pd
 import streamlit as st
 
 import config
@@ -24,6 +23,7 @@ from modules import auth
 from modules.audit import build_audit_entry
 from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
+from utils.table_view import render_data_table
 from utils.validators import (
     validate_credits,
     validate_max_marks_configuration,
@@ -409,7 +409,7 @@ def render_subjects_page() -> None:
         st.info("No subjects found.")
         return
 
-    st.dataframe(pd.DataFrame(subjects), use_container_width=True, hide_index=True)
+    render_data_table(subjects, key_prefix="subjects_table", filename_prefix="subjects")
 
     if not is_admin:
         return

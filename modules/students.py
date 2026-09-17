@@ -36,7 +36,6 @@ database.db_manager.execute_transaction(), so they can never happen apart
 
 from datetime import datetime
 
-import pandas as pd
 import streamlit as st
 
 import config
@@ -45,6 +44,7 @@ from modules import auth
 from modules.audit import build_audit_entry
 from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
+from utils.table_view import render_data_table
 from utils.validators import (
     validate_admission_year,
     validate_branch,
@@ -458,7 +458,7 @@ def render_students_page() -> None:
         st.info("No students found.")
         return
 
-    st.dataframe(pd.DataFrame(students), use_container_width=True, hide_index=True)
+    render_data_table(students, key_prefix="students_table", filename_prefix="students")
 
     if not is_admin:
         return  # Teachers can view the list above, but not edit/deactivate.

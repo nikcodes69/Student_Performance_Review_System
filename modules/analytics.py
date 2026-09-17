@@ -64,6 +64,7 @@ from database.db_manager import fetch_all
 from modules import auth, students
 from modules.grades import calculate_percentage, get_grade, is_pass
 from utils.logger import get_logger
+from utils.table_view import render_data_table
 from utils.validators import validate_roll_no
 
 logger = get_logger(__name__)
@@ -884,11 +885,17 @@ def render_analytics_page() -> None:
     st.subheader("Class Rankings")
     rankings = get_class_rankings(semester=semester)
     if rankings:
-        rankings_df = pd.DataFrame(rankings)[
-            ["rank", "roll_no", "student_name", "average_percentage", "percentile"]
+        rankings_display = [
+            {
+                "Rank": row["rank"],
+                "Roll No": row["roll_no"],
+                "Student": row["student_name"],
+                "Average %": row["average_percentage"],
+                "Percentile": row["percentile"],
+            }
+            for row in rankings
         ]
-        rankings_df.columns = ["Rank", "Roll No", "Student", "Average %", "Percentile"]
-        st.dataframe(rankings_df, use_container_width=True, hide_index=True)
+        render_data_table(rankings_display, key_prefix="rankings_table", filename_prefix="class_rankings")
     else:
         st.info("No marks data available yet for this selection.")
 

@@ -52,7 +52,6 @@ student's records, the audit log, everything. Instead:
 from datetime import datetime, timedelta
 
 import bcrypt
-import pandas as pd
 import streamlit as st
 
 import config
@@ -65,6 +64,7 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.table_view import render_data_table
 from utils.validators import validate_email, validate_password, validate_role, validate_roll_no, validate_username
 
 logger = get_logger(__name__)
@@ -807,7 +807,7 @@ def render_user_management_page() -> None:
         }
         for u in users
     ]
-    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+    render_data_table(display_rows, key_prefix="users_table", filename_prefix="users")
 
     st.subheader("Deactivate / reactivate an account")
     username_choice = st.selectbox("Select an account", options=[u["username"] for u in users])

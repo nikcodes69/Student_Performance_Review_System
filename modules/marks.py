@@ -44,7 +44,6 @@ every time also means it is IMPOSSIBLE for a stored percentage to go
 stale after a mark correction.
 """
 
-import pandas as pd
 import streamlit as st
 
 import config
@@ -54,6 +53,7 @@ from modules.audit import build_audit_entry
 from modules.grades import calculate_sgpa, evaluate_subject_marks
 from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
+from utils.table_view import render_data_table
 from utils.validators import (
     validate_exam_type,
     validate_mark_value,
@@ -563,4 +563,4 @@ def render_marks_page() -> None:
         }
         for entry in current_marks
     ]
-    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+    render_data_table(display_rows, key_prefix="marks_table", filename_prefix="marks")

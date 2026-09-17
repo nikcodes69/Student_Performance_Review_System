@@ -40,13 +40,13 @@ not need to know, what columns any particular table has.
 
 import json
 
-import pandas as pd
 import streamlit as st
 
 import config
 from database.db_manager import execute_write, fetch_all
 from modules import auth
 from utils.logger import get_logger
+from utils.table_view import render_data_table
 from utils.validators import validate_audit_action, validate_table_name
 
 logger = get_logger(__name__)
@@ -249,4 +249,4 @@ def render_audit_log_page() -> None:
         for entry in logs
     ]
 
-    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+    render_data_table(display_rows, key_prefix="audit_table", filename_prefix="audit_log")

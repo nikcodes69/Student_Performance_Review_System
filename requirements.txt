@@ -11,6 +11,11 @@ streamlit==1.64.0
 pandas==3.0.5
 numpy==2.5.3
 
+# --- Excel (.xlsx) read/write -- exporting any table, and reading a
+# bulk-import spreadsheet, both go through pandas, which needs this
+# engine installed for .xlsx specifically (CSV needs no extra package).
+openpyxl==3.1.5
+
 # --- Charts (analytics dashboard, ML result plots) ---
 plotly==7.1.0
 

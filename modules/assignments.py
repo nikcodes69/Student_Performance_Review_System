@@ -28,7 +28,6 @@ modules/attendance.py's bulk entry form (plain widgets, not st.form, so
 see that file's render_attendance_page() for the full reasoning.
 """
 
-import pandas as pd
 import streamlit as st
 
 import config
@@ -37,6 +36,7 @@ from modules import auth, students, subjects
 from modules.audit import build_audit_entry
 from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
+from utils.table_view import render_data_table
 from utils.validators import (
     validate_assignment_values,
     validate_roll_no,
@@ -462,4 +462,4 @@ def render_assignments_page() -> None:
         }
         for entry in current_assignments
     ]
-    st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+    render_data_table(display_rows, key_prefix="assignments_table", filename_prefix="assignments")
