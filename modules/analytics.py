@@ -51,10 +51,12 @@ is always safe.
 """
 
 from collections import defaultdict
+from html import escape
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 import config
@@ -212,6 +214,167 @@ def get_bottom_performers(n: int = 5, semester: int | None = None) -> list[dict]
     averages = get_student_averages(semester=semester)
     averages.sort(key=lambda entry: entry["average_percentage"])
     return averages[:n]
+
+
+# ---------------------------------------------------------------------------
+# DASHBOARD-SPECIFIC ANALYTICS (spotlight cards, distributions -- see
+# render_dashboard_page() at the bottom of this file)
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=60)
+def get_student_attendance_averages(semester: int | None = None) -> list[dict]:
+    """
+    Average attendance percentage per student -- the attendance
+    equivalent of get_student_averages() above.
+
+    Args:
+        semester: If given, only attendance recorded in this semester.
+
+    Returns:
+        A list of dicts: roll_no, student_name, average_attendance.
+        Students with zero classes_held anywhere are excluded (nothing
+        meaningful to average -- the same "undefined, not 0%" reasoning
+        as modules/attendance.py's _compute_attendance_percentage()).
+    """
+    query = (
+        "SELECT a.roll_no, st.name AS student_name, "
+        "AVG(a.classes_attended * 100.0 / a.classes_held) AS average_attendance "
+        "FROM attendance a JOIN students st ON a.roll_no = st.roll_no "
+        "WHERE a.classes_held > 0"
+    )
+    params: list = []
+    if semester is not None:
+        query += " AND a.semester = ?"
+        params.append(semester)
+    query += " GROUP BY a.roll_no, st.name"
+
+    return [_round_field(dict(row), "average_attendance") for row in fetch_all(query, tuple(params))]
+
+
+def get_top_attendance_performers(n: int = 1, semester: int | None = None) -> list[dict]:
+    """The n students with the highest average attendance (see get_student_attendance_averages)."""
+    averages = get_student_attendance_averages(semester=semester)
+    averages.sort(key=lambda entry: entry["average_attendance"], reverse=True)
+    return averages[:n]
+
+
+def _latest_semester_with_marks() -> int | None:
+    """The highest semester number that has any marks recorded at all --
+    used as the default "current" semester for dashboard comparisons when
+    the caller doesn't specify one. Returns None if there are no marks
+    anywhere yet."""
+    row = fetch_all("SELECT MAX(semester) AS latest FROM marks")[0]
+    return row["latest"]
+
+
+def get_most_improved_marks(n: int = 1, semester: int | None = None) -> list[dict]:
+    """
+    Students with the largest positive change in average marks percentage
+    between the semester before `semester` and `semester` itself.
+
+    Args:
+        n: How many students to return.
+        semester: The "current" semester to compare against the one
+            immediately before it. Defaults to the latest semester with
+            any marks recorded.
+
+    Returns:
+        A list of dicts: roll_no, student_name, improvement (percentage
+        points, current minus previous -- can be negative, though this
+        function only returns the TOP n, so a negative value here would
+        mean even the "most improved" student actually declined). Empty
+        if there's no semester with marks in both it and the one before.
+    """
+    if semester is None:
+        semester = _latest_semester_with_marks()
+    if semester is None or semester <= config.MIN_SEMESTER:
+        return []
+
+    current = {r["roll_no"]: r for r in get_student_averages(semester=semester)}
+    previous = {r["roll_no"]: r["average_percentage"] for r in get_student_averages(semester=semester - 1)}
+
+    improvements = [
+        {
+            "roll_no": roll_no,
+            "student_name": row["student_name"],
+            "improvement": round(row["average_percentage"] - previous[roll_no], config.ROUND_DECIMALS),
+        }
+        for roll_no, row in current.items() if roll_no in previous
+    ]
+    improvements.sort(key=lambda entry: entry["improvement"], reverse=True)
+    return improvements[:n]
+
+
+def get_most_improved_attendance(n: int = 1, semester: int | None = None) -> list[dict]:
+    """Same as get_most_improved_marks(), but for attendance percentage instead of marks."""
+    if semester is None:
+        semester = _latest_semester_with_marks()
+    if semester is None or semester <= config.MIN_SEMESTER:
+        return []
+
+    current = {r["roll_no"]: r for r in get_student_attendance_averages(semester=semester)}
+    previous = {
+        r["roll_no"]: r["average_attendance"] for r in get_student_attendance_averages(semester=semester - 1)
+    }
+
+    improvements = [
+        {
+            "roll_no": roll_no,
+            "student_name": row["student_name"],
+            "improvement": round(row["average_attendance"] - previous[roll_no], config.ROUND_DECIMALS),
+        }
+        for roll_no, row in current.items() if roll_no in previous
+    ]
+    improvements.sort(key=lambda entry: entry["improvement"], reverse=True)
+    return improvements[:n]
+
+
+@st.cache_data(ttl=60)
+def get_students_by_semester_distribution() -> list[dict]:
+    """Count of active students per semester -- feeds the dashboard's donut chart."""
+    return fetch_all(
+        "SELECT semester, COUNT(*) AS student_count FROM students "
+        "WHERE is_active = 1 GROUP BY semester ORDER BY semester"
+    )
+
+
+@st.cache_data(ttl=60)
+def get_subject_pass_fail_breakdown(semester: int | None = None) -> list[dict]:
+    """
+    Pass/fail counts per subject -- classification, so (per this file's
+    module docstring) computed via modules.grades.is_pass() in Python,
+    not as a second copy of the pass/fail rule in SQL.
+
+    Args:
+        semester: If given, only marks recorded in this semester.
+
+    Returns:
+        A list of dicts: subject_code, subject_name, pass_count, fail_count.
+    """
+    query = (
+        "SELECT m.subject_code, s.name AS subject_name, "
+        "m.internal, m.external, m.practical, s.max_internal, s.max_external, s.max_practical "
+        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code"
+    )
+    params: list = []
+    if semester is not None:
+        query += " WHERE m.semester = ?"
+        params.append(semester)
+
+    per_subject = defaultdict(lambda: {"subject_name": None, "pass_count": 0, "fail_count": 0})
+    for row in fetch_all(query, tuple(params)):
+        percentage = calculate_percentage(
+            row["internal"], row["external"], row["practical"],
+            row["max_internal"], row["max_external"], row["max_practical"],
+        )
+        bucket = per_subject[row["subject_code"]]
+        bucket["subject_name"] = row["subject_name"]
+        if is_pass(percentage):
+            bucket["pass_count"] += 1
+        else:
+            bucket["fail_count"] += 1
+
+    return [{"subject_code": code, **data} for code, data in per_subject.items()]
 
 
 @st.cache_data(ttl=60)
@@ -521,3 +684,196 @@ def render_analytics_page() -> None:
             st.info("No marks recorded yet for this student.")
     else:
         st.info("No students found.")
+
+
+# ---------------------------------------------------------------------------
+# DASHBOARD PAGE -- an at-a-glance overview, distinct from "Analytics"
+# above (which is a deep-dive page with filters and correlation charts).
+# This page is meant to be understood in a glance: KPI cards, spotlight
+# cards for top/most-improved students, and a couple of summary charts.
+# ---------------------------------------------------------------------------
+
+# A small fixed palette for avatar background colors -- picked once here,
+# reused deterministically per name (see _avatar_color()) so the SAME
+# student always gets the SAME color across reruns, rather than a new
+# random one every time the page refreshes.
+_AVATAR_COLORS = ("#4F46E5", "#059669", "#DC2626", "#D97706", "#7C3AED", "#0891B2", "#DB2777", "#65A30D")
+
+
+def _avatar_initials(name: str) -> str:
+    """First letter of up to the first two words of a name, uppercased --
+    e.g. 'Nikhil Thapa' -> 'NT'. This system has no photo uploads, so
+    initials-in-a-colored-circle (the same fallback LinkedIn/Slack/etc.
+    use) stands in for a real avatar."""
+    words = name.split()
+    return "".join(word[0] for word in words[:2]).upper() or "?"
+
+
+def _avatar_color(seed_text: str) -> str:
+    """Deterministic color from _AVATAR_COLORS, picked by summing the
+    character codes of seed_text -- same input always gives the same
+    color, without needing to store a color choice anywhere."""
+    index = sum(ord(character) for character in seed_text) % len(_AVATAR_COLORS)
+    return _AVATAR_COLORS[index]
+
+
+def _render_spotlight_card(name: str, roll_no: str, stat_label: str, stat_value: str) -> None:
+    """
+    Render one spotlight card: a colored initials avatar, the student's
+    name/roll_no, and one highlighted stat -- inside a bordered container
+    so it stays visually consistent with the rest of this app's card
+    styling and adapts automatically to light/dark mode (st.container
+    itself is theme-aware; only the avatar circle's own fixed background
+    color is hardcoded, which is intentional -- a solid color circle
+    should look the same regardless of page theme).
+
+    SECURITY NOTE: name and roll_no are STUDENT-ENTERED data (via
+    modules/students.py's create_student()/update_student()), being
+    interpolated into raw HTML below (unsafe_allow_html=True). Both are
+    passed through html.escape() first -- the same injection-prevention
+    principle as parameterized SQL queries elsewhere in this project,
+    just for a different attack surface (HTML/script injection instead
+    of SQL injection). Without this, a student name containing
+    "<script>...</script>" would be rendered as live markup instead of
+    literal text.
+    """
+    safe_name = escape(name)
+    safe_roll_no = escape(roll_no)
+    color = _avatar_color(name)
+    initials = _avatar_initials(name)
+
+    with st.container(border=True):
+        st.markdown(
+            f"""
+            <div style="display:flex; align-items:center; gap:12px;">
+                <div style="width:44px; height:44px; border-radius:50%; background:{color};
+                            display:flex; align-items:center; justify-content:center;
+                            color:white; font-weight:600; font-size:15px; flex-shrink:0;">
+                    {initials}
+                </div>
+                <div style="min-width:0;">
+                    <div style="font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{safe_name}</div>
+                    <div style="font-size:12px; opacity:0.65;">{safe_roll_no}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.caption(f"{stat_label}: **{stat_value}**")
+
+
+def render_dashboard_page() -> None:
+    """
+    Streamlit page: KPI cards, spotlight cards (best/most-improved
+    students in marks and attendance, with avatar-style cards), a
+    student-distribution donut chart, a per-subject pass/fail breakdown,
+    and per-subject average-score gauges.
+    """
+    user = auth.require_role(config.ROLE_ADMIN, config.ROLE_TEACHER)
+
+    st.title("Dashboard")
+    st.caption(f"Signed in as **{user['username']}** ({user['role'].capitalize()})")
+
+    summary = get_dashboard_summary()
+    kpi_cols = st.columns(4)
+    kpi_cols[0].metric(":material/group: Students", summary["student_count"])
+    kpi_cols[1].metric(
+        ":material/event_available: Avg. Attendance",
+        f"{summary['avg_attendance']}%" if summary["avg_attendance"] is not None else "N/A",
+    )
+    kpi_cols[2].metric(":material/menu_book: Subjects", summary["subject_count"])
+    kpi_cols[3].metric(
+        ":material/check_circle: Pass Rate",
+        f"{summary['pass_rate']}%" if summary["pass_rate"] is not None else "N/A",
+    )
+
+    st.divider()
+    st.subheader("Spotlight")
+
+    spotlight_cols = st.columns(4)
+
+    with spotlight_cols[0]:
+        top_marks = get_top_performers(n=1)
+        if top_marks:
+            entry = top_marks[0]
+            _render_spotlight_card(entry["student_name"], entry["roll_no"], "Best in Marks", f"{entry['average_percentage']}%")
+        else:
+            st.info("No marks data yet.")
+
+    with spotlight_cols[1]:
+        top_attendance = get_top_attendance_performers(n=1)
+        if top_attendance:
+            entry = top_attendance[0]
+            _render_spotlight_card(entry["student_name"], entry["roll_no"], "Best in Attendance", f"{entry['average_attendance']}%")
+        else:
+            st.info("No attendance data yet.")
+
+    with spotlight_cols[2]:
+        most_improved_marks = get_most_improved_marks(n=1)
+        if most_improved_marks:
+            entry = most_improved_marks[0]
+            sign = "+" if entry["improvement"] >= 0 else ""
+            _render_spotlight_card(entry["student_name"], entry["roll_no"], "Most Improved (Marks)", f"{sign}{entry['improvement']} pts")
+        else:
+            st.info("Need 2 semesters of marks to compute this.")
+
+    with spotlight_cols[3]:
+        most_improved_attendance = get_most_improved_attendance(n=1)
+        if most_improved_attendance:
+            entry = most_improved_attendance[0]
+            sign = "+" if entry["improvement"] >= 0 else ""
+            _render_spotlight_card(entry["student_name"], entry["roll_no"], "Most Improved (Attendance)", f"{sign}{entry['improvement']} pts")
+        else:
+            st.info("Need 2 semesters of attendance to compute this.")
+
+    st.divider()
+    chart_col1, chart_col2 = st.columns(2)
+
+    with chart_col1:
+        st.subheader("Students by Semester")
+        distribution = get_students_by_semester_distribution()
+        if distribution:
+            distribution_df = pd.DataFrame(distribution)
+            distribution_df["label"] = "Semester " + distribution_df["semester"].astype(str)
+            fig = px.pie(distribution_df, names="label", values="student_count", hole=0.55)
+            fig.update_layout(height=340, margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No students yet.")
+
+    with chart_col2:
+        st.subheader("Pass / Fail by Subject")
+        breakdown = get_subject_pass_fail_breakdown()
+        if breakdown:
+            breakdown_df = pd.DataFrame(breakdown)
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=breakdown_df["subject_code"], y=breakdown_df["pass_count"], name="Pass"))
+            fig.add_trace(go.Bar(x=breakdown_df["subject_code"], y=breakdown_df["fail_count"], name="Fail"))
+            fig.update_layout(barmode="stack", height=340, margin=dict(t=10, b=10, l=10, r=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No marks data yet.")
+
+    st.divider()
+    st.subheader("Average Score by Subject")
+    subject_averages = get_subject_averages()
+    if subject_averages:
+        gauge_columns_per_row = 4
+        for row_start in range(0, len(subject_averages), gauge_columns_per_row):
+            row_entries = subject_averages[row_start:row_start + gauge_columns_per_row]
+            gauge_cols = st.columns(gauge_columns_per_row)
+            for col, entry in zip(gauge_cols, row_entries):
+                with col:
+                    fig = go.Figure(go.Indicator(
+                        mode="gauge+number",
+                        value=entry["average_percentage"],
+                        title={"text": entry["subject_code"]},
+                        gauge={
+                            "axis": {"range": [0, 100]},
+                            "bar": {"color": _avatar_color(entry["subject_code"])},
+                        },
+                    ))
+                    fig.update_layout(height=220, margin=dict(t=40, b=10, l=20, r=20))
+                    st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No marks data yet.")

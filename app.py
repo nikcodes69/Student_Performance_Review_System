@@ -55,6 +55,7 @@ logger = get_logger(__name__)
 # (":material/name:"), not emoji -- a real, consistent icon set rather
 # than a decorative flourish.
 HOME_SECTIONS = [
+    ("Dashboard", ":material/dashboard:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Spotlight cards, charts, and gauges at a glance"),
     ("Students", ":material/group:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Manage student records"),
     ("Subjects", ":material/menu_book:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Configure the curriculum"),
     ("Marks Entry", ":material/edit_note:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Record internal/external/practical marks"),
@@ -119,6 +120,7 @@ def render_home_page() -> None:
 # throughout this project (see modules/auth.py's check_permission()).
 PAGES = {
     "Home": (config.VALID_ROLES, render_home_page),
+    "Dashboard": ((config.ROLE_ADMIN, config.ROLE_TEACHER), analytics.render_dashboard_page),
     "Students": ((config.ROLE_ADMIN, config.ROLE_TEACHER), students.render_students_page),
     "Subjects": ((config.ROLE_ADMIN, config.ROLE_TEACHER), subjects.render_subjects_page),
     "Marks Entry": ((config.ROLE_ADMIN, config.ROLE_TEACHER), marks.render_marks_page),
