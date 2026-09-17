@@ -50,9 +50,8 @@ import pandas as pd
 import streamlit as st
 
 import config
-from modules import auth, students, subjects
-from modules.grades import calculate_sgpa
-from modules.marks import list_marks_for_student
+from modules import auth, students
+from modules.marks import compute_sgpa_for_marks, list_marks_for_student
 from modules.attendance import list_attendance_for_student
 from utils.exceptions import ModelNotFoundError, ValidationError
 from utils.logger import get_logger
@@ -122,21 +121,12 @@ def _get_segmentation_model():
 # ---------------------------------------------------------------------------
 
 def _compute_sgpa_for_semester(roll_no: str, semester: int) -> float | None:
-    """SGPA for one semester, computed live from marks + each subject's
-    credits, via the same modules.grades.calculate_sgpa() the rest of the
-    app uses. Returns None if no marks exist for that semester."""
+    """SGPA for one semester, computed live from that semester's marks.
+    Thin wrapper around modules.marks.compute_sgpa_for_marks() -- see that
+    function's docstring for why this calculation is centralised there
+    rather than duplicated here."""
     semester_marks = list_marks_for_student(roll_no, semester=semester)
-    if not semester_marks:
-        return None
-
-    subject_results = [
-        {
-            "credits": subjects.get_subject(row["subject_code"], include_inactive=True)["credits"],
-            "grade_point": row["grade_point"],
-        }
-        for row in semester_marks
-    ]
-    return calculate_sgpa(subject_results)
+    return compute_sgpa_for_marks(semester_marks)
 
 
 def _compute_backlog_count(roll_no: str) -> int:

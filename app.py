@@ -36,9 +36,15 @@ safe message.
 import streamlit as st
 
 import config
-from modules import analytics, attendance, audit, auth, ml_predictions, marks, students, subjects
+from modules import analytics, attendance, audit, auth, ml_predictions, marks, student_portal, students, subjects
 from utils.pdf_generator import render_report_card_page
-from utils.exceptions import AppError, AuthenticationError, ValidationError
+from utils.exceptions import (
+    AppError,
+    AuthenticationError,
+    DuplicateRecordError,
+    RecordNotFoundError,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -60,30 +66,37 @@ HOME_SECTIONS = [
     ("Model Comparison", ":material/model_training:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Metrics behind every deployed model"),
     ("Report Card", ":material/picture_as_pdf:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Downloadable PDF report card"),
     ("Audit Log", ":material/history:", (config.ROLE_ADMIN,), "Full history of every change"),
+    ("User Management", ":material/manage_accounts:", (config.ROLE_ADMIN,), "Create Teacher/Admin accounts"),
+    ("My Performance", ":material/person:", (config.ROLE_STUDENT,), "Your own marks, attendance, and predictions"),
 ]
 
 
 def render_home_page() -> None:
-    """Landing dashboard, visible to every logged-in role."""
+    """Landing dashboard, visible to every logged-in role. The
+    institution-wide metrics row is Admin/Teacher only -- a Student's own
+    numbers belong on their dedicated "My Performance" page (see
+    modules/student_portal.py), not mixed in with aggregate stats about
+    every OTHER student too."""
     user = auth.get_current_user()
     st.title("Student Performance Review & Prediction System")
 
-    summary = analytics.get_dashboard_summary()
+    if user["role"] in (config.ROLE_ADMIN, config.ROLE_TEACHER):
+        summary = analytics.get_dashboard_summary()
 
-    metric_cols = st.columns(5)
-    metric_cols[0].metric(":material/group: Active Students", summary["student_count"])
-    metric_cols[1].metric(":material/menu_book: Active Subjects", summary["subject_count"])
-    metric_cols[2].metric(":material/edit_note: Marks Recorded", summary["marks_count"])
-    metric_cols[3].metric(
-        ":material/check_circle: Pass Rate",
-        f"{summary['pass_rate']}%" if summary["pass_rate"] is not None else "N/A",
-    )
-    metric_cols[4].metric(
-        ":material/event_available: Avg. Attendance",
-        f"{summary['avg_attendance']}%" if summary["avg_attendance"] is not None else "N/A",
-    )
+        metric_cols = st.columns(5)
+        metric_cols[0].metric(":material/group: Active Students", summary["student_count"])
+        metric_cols[1].metric(":material/menu_book: Active Subjects", summary["subject_count"])
+        metric_cols[2].metric(":material/edit_note: Marks Recorded", summary["marks_count"])
+        metric_cols[3].metric(
+            ":material/check_circle: Pass Rate",
+            f"{summary['pass_rate']}%" if summary["pass_rate"] is not None else "N/A",
+        )
+        metric_cols[4].metric(
+            ":material/event_available: Avg. Attendance",
+            f"{summary['avg_attendance']}%" if summary["avg_attendance"] is not None else "N/A",
+        )
+        st.divider()
 
-    st.divider()
     st.subheader("Available pages")
 
     visible_sections = [s for s in HOME_SECTIONS if user["role"] in s[2]]
@@ -116,6 +129,8 @@ PAGES = {
     "Model Comparison": ((config.ROLE_ADMIN, config.ROLE_TEACHER), ml_predictions.render_model_comparison_page),
     "Report Card": ((config.ROLE_ADMIN, config.ROLE_TEACHER), render_report_card_page),
     "Audit Log": ((config.ROLE_ADMIN,), audit.render_audit_log_page),
+    "User Management": ((config.ROLE_ADMIN,), auth.render_user_management_page),
+    "My Performance": ((config.ROLE_STUDENT,), student_portal.render_student_portal_page),
 }
 
 # Icon per sidebar entry, reusing HOME_SECTIONS' icon choices (plus Home's
@@ -127,40 +142,89 @@ PAGE_ICONS = {"Home": ":material/home:"} | {label: icon for label, icon, _roles,
 
 
 def render_login_form() -> None:
-    """Show the login form and handle a submitted login attempt."""
+    """
+    Show the Log In / Sign Up screen and handle either submission.
+
+    Sign Up here means STUDENT self-registration only -- see
+    modules/auth.py's module docstring ("WHO CAN CREATE AN ACCOUNT") for
+    why Teacher and Admin accounts are deliberately never created through
+    a public-facing form like this one; those are created by an existing
+    Admin, on the User Management page, once logged in.
+    """
     # A centered, fixed-width column instead of a full-page-wide form --
     # purely a layout choice (st.columns with unused side columns to
     # center the middle one), no new widget behaviour.
     _left, center, _right = st.columns([1, 1.2, 1])
     with center:
         st.title(":material/school: Student Performance System")
-        st.caption("Sign in to continue")
 
-        # st.form groups the two inputs and the button together so the
-        # page only reruns (and only tries to log in) once, when "Log In"
-        # is clicked -- not on every single keystroke in the username/
-        # password boxes, which is what would happen without a form.
-        with st.form("login_form"):
-            username = st.text_input("Username", placeholder="e.g. admin")
-            password = st.text_input("Password", type="password", placeholder="••••••••")
-            submitted = st.form_submit_button("Log In", use_container_width=True, type="primary")
+        login_tab, signup_tab = st.tabs(["Log In", "Sign Up (Students)"])
 
-        if submitted:
-            try:
-                user = auth.login(username, password)
-                st.success(f"Welcome, {user['username']} ({user['role']}).")
-                # st.rerun() immediately restarts the script from the top.
-                # This matters because is_session_valid() (checked in
-                # main(), below) needs to run again to notice the session
-                # we JUST created above -- without this, the user would
-                # still see the login form for one extra click.
-                st.rerun()
-            except (ValidationError, AuthenticationError) as error:
-                # Both exception types produce a message written
-                # specifically to be shown to a human (see
-                # utils/validators.py and modules/auth.py) -- so
-                # str(error) is safe and appropriate to display directly.
-                st.error(str(error))
+        with login_tab:
+            st.caption("Sign in to continue")
+
+            # st.form groups the two inputs and the button together so the
+            # page only reruns (and only tries to log in) once, when "Log
+            # In" is clicked -- not on every single keystroke in the
+            # username/password boxes, which is what would happen without
+            # a form.
+            with st.form("login_form"):
+                username = st.text_input("Username", placeholder="e.g. admin")
+                password = st.text_input("Password", type="password", placeholder="••••••••")
+                submitted = st.form_submit_button("Log In", use_container_width=True, type="primary")
+
+            if submitted:
+                try:
+                    user = auth.login(username, password)
+                    st.success(f"Welcome, {user['username']} ({user['role']}).")
+                    # st.rerun() immediately restarts the script from the
+                    # top. This matters because is_session_valid() (checked
+                    # in main(), below) needs to run again to notice the
+                    # session we JUST created above -- without this, the
+                    # user would still see the login form for one extra click.
+                    st.rerun()
+                except (ValidationError, AuthenticationError) as error:
+                    # Both exception types produce a message written
+                    # specifically to be shown to a human (see
+                    # utils/validators.py and modules/auth.py) -- so
+                    # str(error) is safe and appropriate to display directly.
+                    st.error(str(error))
+
+        with signup_tab:
+            st.caption(
+                "For students only. Your roll number must already exist in the "
+                "system (an Admin or Teacher enters it when you're enrolled) -- "
+                "this just creates YOUR login for it."
+            )
+            with st.form("signup_form", clear_on_submit=True):
+                signup_roll_no = st.text_input("Roll Number", placeholder="e.g. BCA078123")
+                signup_email = st.text_input(
+                    "Email", placeholder="the email on file for your roll number",
+                )
+                signup_password = st.text_input(
+                    "Choose a Password", type="password", placeholder="At least 8 characters",
+                )
+                signup_confirm = st.text_input("Confirm Password", type="password")
+                signup_submitted = st.form_submit_button(
+                    "Create My Account", use_container_width=True,
+                )
+
+            if signup_submitted:
+                if signup_password != signup_confirm:
+                    st.error("Passwords do not match.")
+                else:
+                    try:
+                        auth.self_register_student(signup_roll_no, signup_email, signup_password)
+                        st.success("Account created. Switch to the Log In tab to sign in.")
+                    except (ValidationError, RecordNotFoundError, DuplicateRecordError) as error:
+                        # RecordNotFoundError: no such roll_no on file yet
+                        #   (an Admin/Teacher needs to create the student
+                        #   record first -- see the caption above).
+                        # ValidationError: bad email/password, or the email
+                        #   didn't match what's on file for that roll_no.
+                        # DuplicateRecordError: a login already exists for
+                        #   this roll_no.
+                        st.error(str(error))
 
 
 def render_authenticated_view(user: dict) -> None:

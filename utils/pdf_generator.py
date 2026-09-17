@@ -38,9 +38,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 import config
 from modules import auth, students
 from modules.attendance import list_attendance_for_student
-from modules.grades import calculate_sgpa
-from modules.marks import list_marks_for_student
-from modules.subjects import get_subject
+from modules.marks import compute_sgpa_for_marks, list_marks_for_student
 from utils.exceptions import ModelNotFoundError, ValidationError
 from utils.logger import get_logger
 
@@ -62,30 +60,11 @@ TABLE_HEADER_STYLE = [
 # ---------------------------------------------------------------------------
 # PURE PDF-BUILDING LOGIC (no Streamlit here, down to generate_report_card)
 # ---------------------------------------------------------------------------
-
-def _compute_sgpa(subject_marks: list[dict]) -> float | None:
-    """
-    Compute SGPA from already-fetched marks rows (each already carrying a
-    grade_point, attached by modules.marks._with_evaluation()), by
-    looking up each subject's credits and calling
-    modules.grades.calculate_sgpa() -- the same grade engine every other
-    part of this app uses, so the SGPA on a report card can never
-    disagree with the SGPA the rest of the system would compute.
-
-    Returns:
-        The SGPA, or None if subject_marks is empty (nothing to compute).
-    """
-    if not subject_marks:
-        return None
-
-    subject_results = [
-        {
-            "credits": get_subject(row["subject_code"], include_inactive=True)["credits"],
-            "grade_point": row["grade_point"],
-        }
-        for row in subject_marks
-    ]
-    return calculate_sgpa(subject_results)
+# SGPA is computed via modules.marks.compute_sgpa_for_marks() -- see that
+# function's docstring for why this calculation is centralised in one
+# shared place (modules/ml_predictions.py and modules/student_portal.py
+# both need the exact same "marks rows -> SGPA" computation) rather than
+# a private copy living in this file.
 
 
 def _build_student_info_section(student: dict, semester: int, styles) -> list:
@@ -255,7 +234,7 @@ def generate_report_card(roll_no: str, semester: int, assignments_submitted: int
     student = students.get_student(roll_no)
     subject_marks = list_marks_for_student(roll_no, semester=semester)
     subject_attendance = list_attendance_for_student(roll_no, semester=semester)
-    sgpa = _compute_sgpa(subject_marks)
+    sgpa = compute_sgpa_for_marks(subject_marks)
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=2 * cm, bottomMargin=2 * cm)
