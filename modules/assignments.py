@@ -35,6 +35,7 @@ from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth, students, subjects
 from modules.audit import build_audit_entry
 from modules.teacher_subjects import check_teacher_subject_access, list_subjects_for_marks_entry
+from utils.bulk_import import render_bulk_import
 from utils.exceptions import AuthorizationError, DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.table_view import render_data_table
@@ -337,6 +338,77 @@ def list_assignments_for_subject(subject_code: str, semester: int | None = None)
 
 
 # ---------------------------------------------------------------------------
+# BULK IMPORT (see utils/bulk_import.py's module docstring, and
+# modules/marks.py's _validate_bulk_marks_row() for the identical
+# reasoning applied there, including why teacher-subject access is
+# checked in the validator itself)
+# ---------------------------------------------------------------------------
+
+def _validate_bulk_assignment_row(row: dict, acting_user: dict) -> None:
+    """
+    Validate one row of a bulk assignment import, run during the PREVIEW
+    step. Reuses validate_assignment_values() -- the same "submitted
+    cannot exceed total_assigned" rule record_assignment()/
+    update_assignment() themselves enforce.
+
+    Args:
+        row: One row from the uploaded file.
+        acting_user: The logged-in Admin or Teacher running the import.
+
+    Raises:
+        ValidationError: if any field is missing, malformed, or
+            submitted exceeds total_assigned.
+        RecordNotFoundError: if the student or subject does not exist
+            (or is inactive).
+        AuthorizationError: if acting_user is a Teacher not assigned to
+            this subject.
+    """
+    roll_no = validate_roll_no(row.get("roll_no", ""))
+    subject_code = validate_subject_code(row.get("subject_code", ""))
+
+    try:
+        semester = int(row.get("semester", ""))
+    except (TypeError, ValueError):
+        raise ValidationError(f"Semester must be a whole number, got '{row.get('semester')}'.")
+    validate_semester(semester)
+
+    check_teacher_subject_access(acting_user, subject_code)
+
+    students.get_student(roll_no)
+    subjects.get_subject(subject_code)
+
+    try:
+        total_assigned = int(row.get("total_assigned", ""))
+        submitted = int(row.get("submitted", ""))
+    except (TypeError, ValueError):
+        raise ValidationError("total_assigned/submitted must both be whole numbers.")
+
+    validate_assignment_values(total_assigned, submitted)
+
+
+def _commit_bulk_assignment_row(row: dict, acting_user: dict) -> None:
+    """Insert or update one bulk-imported assignment row -- an UPSERT,
+    the same "insert if new, else update" pattern
+    modules/marks.py's _commit_bulk_marks_row() uses, for the same
+    reason (a re-imported, corrected spreadsheet should fix an existing
+    entry, not fail with DuplicateRecordError)."""
+    roll_no = row["roll_no"]
+    subject_code = row["subject_code"]
+    semester = int(row["semester"])
+    total_assigned = int(row["total_assigned"])
+    submitted = int(row["submitted"])
+
+    existing = get_assignment_entry(roll_no, subject_code, semester)
+    if existing is None:
+        record_assignment(roll_no, subject_code, total_assigned, submitted, semester, acting_user)
+    else:
+        update_assignment(
+            existing["assignment_id"], acting_user,
+            total_assigned=total_assigned, submitted=submitted,
+        )
+
+
+# ---------------------------------------------------------------------------
 # STREAMLIT PAGE
 # ---------------------------------------------------------------------------
 
@@ -359,6 +431,15 @@ def render_assignments_page() -> None:
         "compute a real engagement score automatically, instead of asking for "
         "a manually-typed number every time."
     )
+
+    with st.expander("Bulk Import Assignments (CSV/Excel)"):
+        render_bulk_import(
+            key_prefix="assignments_import",
+            required_columns=("roll_no", "subject_code", "semester", "total_assigned", "submitted"),
+            key_columns=("roll_no", "subject_code", "semester"),
+            validate_row=lambda row: _validate_bulk_assignment_row(row, user),
+            commit_row=lambda row: _commit_bulk_assignment_row(row, user),
+        )
 
     subject_list = list_subjects_for_marks_entry(user)
     if not subject_list:

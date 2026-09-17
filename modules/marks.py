@@ -56,6 +56,7 @@ from modules import auth, students, subjects
 from modules.audit import build_audit_entry
 from modules.grades import calculate_sgpa, evaluate_subject_marks
 from modules.teacher_subjects import check_teacher_subject_access, list_subjects_for_marks_entry
+from utils.bulk_import import render_bulk_import
 from utils.exceptions import AuthorizationError, DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.table_view import render_data_table
@@ -427,6 +428,96 @@ def compute_sgpa_for_marks(subject_marks: list[dict]) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# BULK IMPORT (see utils/bulk_import.py's module docstring, and
+# modules/students.py's _validate_bulk_student_row() for the identical
+# reasoning applied there)
+# ---------------------------------------------------------------------------
+
+def _validate_bulk_marks_row(row: dict, acting_user: dict) -> None:
+    """
+    Validate one row of a bulk marks import, run during the PREVIEW step.
+    Reuses the exact same validators AND per-subject mark-ceiling
+    validation (validate_mark_value(), which needs the subject's own
+    max_internal/external/practical) that enter_marks()/update_marks()
+    themselves use -- a row from a spreadsheet is held to identical rules
+    as one typed into the manual bulk-entry form.
+
+    ALSO CHECKS TEACHER-SUBJECT ACCESS HERE, UNLIKE MOST OTHER
+    _validate_bulk_*_row() FUNCTIONS: render_marks_page()'s manual entry
+    form only ever shows a Teacher their OWN assigned subjects (see
+    modules/teacher_subjects.py), so there is no way for that form to
+    submit an unassigned subject_code in the first place. A spreadsheet
+    has no such constraint -- it can list ANY subject_code -- so this
+    function takes acting_user and checks access explicitly, letting the
+    preview show "not assigned to this subject" up front rather than
+    only discovering it when _commit_bulk_marks_row() calls enter_marks()/
+    update_marks() (which enforce the same check regardless).
+
+    Args:
+        row: One row from the uploaded file.
+        acting_user: The logged-in Admin or Teacher running the import.
+
+    Raises:
+        ValidationError: if any field is missing, malformed, or fails
+            the subject's own mark ceilings.
+        RecordNotFoundError: if the student or subject does not exist
+            (or is inactive).
+        AuthorizationError: if acting_user is a Teacher not assigned to
+            this subject.
+    """
+    roll_no = validate_roll_no(row.get("roll_no", ""))
+    subject_code = validate_subject_code(row.get("subject_code", ""))
+
+    try:
+        semester = int(row.get("semester", ""))
+    except (TypeError, ValueError):
+        raise ValidationError(f"Semester must be a whole number, got '{row.get('semester')}'.")
+    validate_semester(semester)
+
+    exam_type = validate_exam_type(row.get("exam_type", ""))
+
+    check_teacher_subject_access(acting_user, subject_code)
+
+    students.get_student(roll_no)
+    subject = subjects.get_subject(subject_code)
+
+    try:
+        internal = int(row.get("internal", ""))
+        external = int(row.get("external", ""))
+        practical = int(row.get("practical", ""))
+    except (TypeError, ValueError):
+        raise ValidationError("internal/external/practical must all be whole numbers.")
+
+    validate_mark_value(internal, subject["max_internal"], "internal")
+    validate_mark_value(external, subject["max_external"], "external")
+    validate_mark_value(practical, subject["max_practical"], "practical")
+
+
+def _commit_bulk_marks_row(row: dict, acting_user: dict) -> None:
+    """
+    Insert or update one bulk-imported marks row -- an UPSERT, since
+    re-importing a corrected spreadsheet for a student who already has
+    marks on file should correct them, not fail with
+    DuplicateRecordError. This mirrors render_marks_page()'s own manual
+    bulk-entry form, which already does "insert if new, else update"
+    (see its save loop below).
+    """
+    roll_no = row["roll_no"]
+    subject_code = row["subject_code"]
+    semester = int(row["semester"])
+    exam_type = row["exam_type"]
+    internal = int(row["internal"])
+    external = int(row["external"])
+    practical = int(row["practical"])
+
+    existing = get_marks_entry(roll_no, subject_code, semester, exam_type)
+    if existing is None:
+        enter_marks(roll_no, subject_code, internal, external, practical, semester, exam_type, acting_user)
+    else:
+        update_marks(existing["mark_id"], acting_user, internal=internal, external=external, practical=practical)
+
+
+# ---------------------------------------------------------------------------
 # STREAMLIT PAGE
 # ---------------------------------------------------------------------------
 
@@ -440,6 +531,15 @@ def render_marks_page() -> None:
     user = auth.require_role(*MARKS_WRITE_ROLES)
 
     st.title("Marks Entry")
+
+    with st.expander("Bulk Import Marks (CSV/Excel)"):
+        render_bulk_import(
+            key_prefix="marks_import",
+            required_columns=("roll_no", "subject_code", "semester", "exam_type", "internal", "external", "practical"),
+            key_columns=("roll_no", "subject_code", "semester", "exam_type"),
+            validate_row=lambda row: _validate_bulk_marks_row(row, user),
+            commit_row=lambda row: _commit_bulk_marks_row(row, user),
+        )
 
     subject_list = list_subjects_for_marks_entry(user)
     if not subject_list:

@@ -80,10 +80,19 @@ def parse_uploaded_file(uploaded_file) -> pd.DataFrame:
     return df
 
 
+def _row_key(row: dict, key_columns: tuple[str, ...]) -> str:
+    """Build one row's composite key string, e.g. ("roll_no",
+    "subject_code", "semester") -> "S1:SUB1:1" -- used both to detect
+    in-file duplicates and to label a row in error messages. A tuple of
+    one column (most callers) still works fine -- it just produces a
+    plain, unjoined value."""
+    return ":".join(str(row.get(column, "")) for column in key_columns)
+
+
 def render_bulk_import(
     key_prefix: str,
     required_columns: tuple[str, ...],
-    key_column: str,
+    key_columns: tuple[str, ...],
     validate_row: Callable[[dict], None],
     commit_row: Callable[[dict], None],
 ) -> None:
@@ -95,14 +104,17 @@ def render_bulk_import(
         key_prefix: Unique per call site (widget keys).
         required_columns: Column names the uploaded file MUST contain
             (checked once, up front, against the file's own header row).
-        key_column: The column that must be unique WITHIN the uploaded
-            file itself (e.g. "roll_no", "subject_code") -- checked here,
-            generically, before validate_row runs on each row, since a
-            single row in isolation cannot tell that another row later in
-            the SAME file repeats its own key. validate_row is still
-            responsible for checking uniqueness against the EXISTING
-            database (a row can be unique within the file but still
-            collide with a record already on file).
+        key_columns: The column(s) that together must be unique WITHIN
+            the uploaded file itself -- e.g. ("roll_no",) for a students
+            import, or ("roll_no", "subject_code", "semester") for an
+            attendance import, where no single column alone identifies
+            one logical record. Checked here, generically, before
+            validate_row runs on each row, since a single row in
+            isolation cannot tell that another row later in the SAME file
+            repeats its own key. validate_row is still responsible for
+            checking uniqueness against the EXISTING database (a row can
+            be unique within the file but still collide with a record
+            already on file).
         validate_row: Called once per row (a dict of column name ->
             string cell value). Should raise ValidationError,
             DuplicateRecordError, or RecordNotFoundError if the row is
@@ -142,19 +154,20 @@ def render_bulk_import(
         st.warning("The uploaded file has no data rows.")
         return
 
-    # In-file duplicate check on key_column -- see this function's
+    # In-file duplicate check on key_columns -- see this function's
     # docstring for why this is handled here, generically, rather than
     # inside each caller's own validate_row.
     key_counts: dict[str, int] = {}
     for row in rows:
-        key_counts[row.get(key_column, "")] = key_counts.get(row.get(key_column, ""), 0) + 1
+        key = _row_key(row, key_columns)
+        key_counts[key] = key_counts.get(key, 0) + 1
 
     preview_rows = []
     valid_rows = []
     for row in rows:
-        key_value = row.get(key_column, "")
-        if key_counts.get(key_value, 0) > 1:
-            status = f"Invalid: duplicate '{key_column}' ({key_value}) within this file"
+        key = _row_key(row, key_columns)
+        if key_counts.get(key, 0) > 1:
+            status = f"Invalid: duplicate ({', '.join(key_columns)}) = ({key}) within this file"
         else:
             try:
                 validate_row(row)
@@ -194,7 +207,7 @@ def render_bulk_import(
                 # roll_no in the seconds since the preview ran) -- caught
                 # per-row so one such collision does not abort the rest
                 # of an otherwise-good batch.
-                commit_errors.append(f"{row.get(key_column, '?')}: {error}")
+                commit_errors.append(f"{_row_key(row, key_columns)}: {error}")
 
         if committed_count:
             st.success(f"Imported {committed_count} row(s) successfully.")

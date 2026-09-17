@@ -457,7 +457,7 @@ def render_subjects_page() -> None:
                     "subject_code", "name", "semester", "credits",
                     "max_internal", "max_external", "max_practical",
                 ),
-                key_column="subject_code",
+                key_columns=("subject_code",),
                 validate_row=_validate_bulk_subject_row,
                 commit_row=lambda row: create_subject(
                     row["subject_code"], row["name"], int(row["semester"]), int(row["credits"]),

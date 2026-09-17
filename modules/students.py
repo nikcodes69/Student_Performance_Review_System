@@ -502,7 +502,7 @@ def render_students_page() -> None:
             render_bulk_import(
                 key_prefix="students_import",
                 required_columns=("roll_no", "name", "semester", "branch", "email", "phone", "admission_year"),
-                key_column="roll_no",
+                key_columns=("roll_no",),
                 validate_row=_validate_bulk_student_row,
                 commit_row=lambda row: create_student(
                     row["roll_no"], row["name"], int(row["semester"]), row["branch"],

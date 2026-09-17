@@ -33,6 +33,7 @@ from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth, students, subjects
 from modules.audit import build_audit_entry
 from modules.teacher_subjects import check_teacher_subject_access, list_subjects_for_marks_entry
+from utils.bulk_import import render_bulk_import
 from utils.exceptions import AuthorizationError, DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.table_view import render_data_table
@@ -339,6 +340,77 @@ def list_attendance_for_subject(subject_code: str, semester: int | None = None) 
 
 
 # ---------------------------------------------------------------------------
+# BULK IMPORT (see utils/bulk_import.py's module docstring, and
+# modules/marks.py's _validate_bulk_marks_row() for the identical
+# reasoning applied there, including why teacher-subject access is
+# checked in the validator itself)
+# ---------------------------------------------------------------------------
+
+def _validate_bulk_attendance_row(row: dict, acting_user: dict) -> None:
+    """
+    Validate one row of a bulk attendance import, run during the PREVIEW
+    step. Reuses validate_attendance_values() -- the same "classes
+    attended cannot exceed classes held" rule record_attendance()/
+    update_attendance() themselves enforce.
+
+    Args:
+        row: One row from the uploaded file.
+        acting_user: The logged-in Admin or Teacher running the import.
+
+    Raises:
+        ValidationError: if any field is missing, malformed, or classes
+            attended exceeds classes held.
+        RecordNotFoundError: if the student or subject does not exist
+            (or is inactive).
+        AuthorizationError: if acting_user is a Teacher not assigned to
+            this subject.
+    """
+    roll_no = validate_roll_no(row.get("roll_no", ""))
+    subject_code = validate_subject_code(row.get("subject_code", ""))
+
+    try:
+        semester = int(row.get("semester", ""))
+    except (TypeError, ValueError):
+        raise ValidationError(f"Semester must be a whole number, got '{row.get('semester')}'.")
+    validate_semester(semester)
+
+    check_teacher_subject_access(acting_user, subject_code)
+
+    students.get_student(roll_no)
+    subjects.get_subject(subject_code)
+
+    try:
+        classes_held = int(row.get("classes_held", ""))
+        classes_attended = int(row.get("classes_attended", ""))
+    except (TypeError, ValueError):
+        raise ValidationError("classes_held/classes_attended must both be whole numbers.")
+
+    validate_attendance_values(classes_held, classes_attended)
+
+
+def _commit_bulk_attendance_row(row: dict, acting_user: dict) -> None:
+    """Insert or update one bulk-imported attendance row -- an UPSERT,
+    the same "insert if new, else update" pattern
+    modules/marks.py's _commit_bulk_marks_row() uses, for the same
+    reason (a re-imported, corrected spreadsheet should fix an existing
+    entry, not fail with DuplicateRecordError)."""
+    roll_no = row["roll_no"]
+    subject_code = row["subject_code"]
+    semester = int(row["semester"])
+    classes_held = int(row["classes_held"])
+    classes_attended = int(row["classes_attended"])
+
+    existing = get_attendance_entry(roll_no, subject_code, semester)
+    if existing is None:
+        record_attendance(roll_no, subject_code, classes_held, classes_attended, semester, acting_user)
+    else:
+        update_attendance(
+            existing["att_id"], acting_user,
+            classes_held=classes_held, classes_attended=classes_attended,
+        )
+
+
+# ---------------------------------------------------------------------------
 # STREAMLIT PAGE
 # ---------------------------------------------------------------------------
 
@@ -351,6 +423,15 @@ def render_attendance_page() -> None:
     user = auth.require_role(*ATTENDANCE_WRITE_ROLES)
 
     st.title("Attendance Tracking")
+
+    with st.expander("Bulk Import Attendance (CSV/Excel)"):
+        render_bulk_import(
+            key_prefix="attendance_import",
+            required_columns=("roll_no", "subject_code", "semester", "classes_held", "classes_attended"),
+            key_columns=("roll_no", "subject_code", "semester"),
+            validate_row=lambda row: _validate_bulk_attendance_row(row, user),
+            commit_row=lambda row: _commit_bulk_attendance_row(row, user),
+        )
 
     subject_list = list_subjects_for_marks_entry(user)
     if not subject_list:
