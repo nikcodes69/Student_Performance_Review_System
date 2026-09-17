@@ -36,6 +36,13 @@ Pandas | NumPy | Plotly | scikit-learn | joblib | bcrypt | ReportLab | pytest
 | 20 | Class rank and percentile per student | `modules/analytics.py` |
 | 21 | Student-vs-class comparative analytics | `modules/analytics.py` |
 | 22 | Change password, with a forced change on a freshly created or admin-reset account | `modules/auth.py` |
+| 23 | Teacher-to-subject assignment (RBAC: a Teacher only enters data for assigned subjects) | `modules/teacher_subjects.py` |
+| 24 | Bulk CSV/Excel import for Marks, Attendance, and Assignments (upsert, with the same preview) | `modules/marks.py`, `attendance.py`, `assignments.py` |
+| 25 | Class-wide At-Risk Report (every student, one click, instead of one at a time) | `modules/ml_predictions.py` |
+| 26 | Full database backup (.zip of every table as CSV, Admin only) | `utils/backup.py` |
+| 27 | Semester promotion tool (advance a whole semester's active students at once) | `modules/students.py` |
+| 28 | Institution-wide PDF Class Report (KPIs, rankings, alerts -- beyond one student's report card) | `utils/pdf_generator.py` |
+| 29 | In-app notifications bell (at-risk/attendance alerts, visible on every page) | `app.py` |
 
 ### Beyond the original 13-module spec
 
@@ -44,7 +51,7 @@ to real usage:
 - **Cloud database (Turso/libSQL)**: `database/db_setup.py`'s
   `get_connection()` uses Turso when `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`
   are configured in Streamlit secrets, falling back to local SQLite
-  otherwise -- local development and all 90 tests stay fully offline.
+  otherwise -- local development and all 168 tests stay fully offline.
 - **Dark mode**: `.streamlit/config.toml` defines both `[theme.light]`
   and `[theme.dark]` -- Streamlit's own built-in Settings menu lets each
   user switch, no custom code involved.
@@ -58,6 +65,22 @@ to real usage:
   KPI on the Dashboard runs the real trained classifier for every active
   student (not a cheaper proxy), cached 5 minutes given the added
   Turso round-trips -- see `ml_predictions.get_at_risk_count()`.
+- **Teacher-to-subject assignment**: `modules/teacher_subjects.py` closes
+  a real access-control gap this project shipped with (any Teacher could
+  enter data for any subject). Two-layer enforcement -- a Teacher's
+  subject pickers only ever show assigned subjects, and every marks/
+  attendance/assignment write function calls
+  `check_teacher_subject_access()` as a business-logic backstop, the
+  same defense-in-depth pattern used throughout this project. Bulk
+  import for Marks/Attendance/Assignments (an UPSERT: re-importing a
+  corrected spreadsheet updates existing rows rather than failing) is
+  gated by the same check.
+- **Class-wide At-Risk Report, full database backup, semester
+  promotion, and an institution-wide PDF Class Report**: see
+  `ml_predictions.get_at_risk_report()`, `utils/backup.py`,
+  `students.promote_students()`, and
+  `pdf_generator.generate_class_report()` respectively -- each reuses
+  existing query functions rather than recomputing anything a second way.
 - **Google Sign-In**: prepared but not yet wired up -- requires OAuth
   credentials from Google Cloud Console, which only the project owner can
   create.
@@ -75,11 +98,12 @@ student_performance_system/
 │   └── student_data.db        # created by db_setup.py (gitignored)
 ├── modules/
 │   ├── auth.py                # authentication, RBAC, self-registration, User Management, Streamlit session
-│   ├── students.py            # student CRUD
+│   ├── students.py            # student CRUD, semester promotion
 │   ├── subjects.py            # subject/curriculum CRUD
 │   ├── marks.py                # marks entry, correction, shared SGPA helper
 │   ├── attendance.py          # attendance entry, correction (live UI-enforced held >= attended)
 │   ├── assignments.py         # assignment tracking (feeds the ML engagement feature)
+│   ├── teacher_subjects.py    # teacher-to-subject assignment (RBAC)
 │   ├── grades.py              # grade engine (pure functions, no DB/UI)
 │   ├── analytics.py           # dashboard queries + Plotly charts
 │   ├── ml_predictions.py      # loads trained models, predicts, ML pages
@@ -95,9 +119,10 @@ student_performance_system/
 │   ├── validators.py          # validation layer, checked before every DB write
 │   ├── exceptions.py          # domain-specific exception classes
 │   ├── logger.py              # logging configuration (writes to logs/app.log)
-│   ├── pdf_generator.py       # report card PDF builder + trigger page
+│   ├── pdf_generator.py       # report card + institution-wide Class Report PDF builders
 │   ├── table_view.py          # search/paginate/export -- shared by every data table
-│   └── bulk_import.py         # CSV/Excel bulk import with a validation preview
+│   ├── bulk_import.py         # CSV/Excel bulk import with a validation preview
+│   └── backup.py              # full-database backup (.zip of every table as CSV)
 ├── .streamlit/
 │   ├── config.toml            # light/dark theme (tracked)
 │   └── secrets.toml           # Turso credentials (gitignored -- never commit this)
@@ -108,7 +133,13 @@ student_performance_system/
 │   ├── test_auth.py
 │   ├── test_analytics.py
 │   ├── test_table_view.py
-│   └── test_bulk_import.py
+│   ├── test_bulk_import.py
+│   ├── test_teacher_subjects.py
+│   ├── test_bulk_import_records.py
+│   ├── test_at_risk_report.py
+│   ├── test_backup.py
+│   ├── test_promotion.py
+│   └── test_class_report.py
 └── logs/
     └── app.log                # created at runtime (gitignored)
 ```
@@ -173,19 +204,25 @@ here; change this password immediately after first login.
 python -m pytest -v
 ```
 
-128 tests across seven files:
+168 tests across thirteen files:
 - `tests/test_validators.py` (58 tests) — every validation rule, including boundary values.
 - `tests/test_grades.py` (20 tests) — percentage/grade/SGPA/CGPA calculations, including deliberately adversarial edge cases like division-by-zero guards and off-by-one grade boundaries.
 - `tests/test_database.py` (13 tests) — CHECK/UNIQUE/FOREIGN KEY constraints and the `PRAGMA foreign_keys` setting itself, run against a throwaway temporary database (never the real `student_data.db`, and never the real Turso database either) created fresh for every test.
 - `tests/test_auth.py` (14 tests) — account creation defaults, self-registration, login, and the change-password/admin-reset-password flow.
 - `tests/test_analytics.py` (7 tests) — class rank/percentile (including tie handling), attendance shortage detection, and the student-vs-class comparison, each verified against hand-calculated expected values.
 - `tests/test_table_view.py` (4 tests) — CSV/Excel export round-trips, including unicode and comma-containing values.
-- `tests/test_bulk_import.py` (12 tests) — file parsing and per-row import validation, including duplicate detection both within a file and against existing records.
+- `tests/test_bulk_import.py` (12 tests) — file parsing and per-row import validation for Students/Subjects, including duplicate detection both within a file and against existing records.
+- `tests/test_teacher_subjects.py` (13 tests) — assignment/unassignment, the access-control check, and end-to-end enforcement inside `modules/marks.py`'s write functions.
+- `tests/test_bulk_import_records.py` (10 tests) — bulk import for Marks/Attendance/Assignments: teacher-access enforcement in the preview, per-subject numeric rules, and the upsert-not-duplicate commit behaviour.
+- `tests/test_at_risk_report.py` (4 tests) — class-wide report sorting/labelling, with `predict_at_risk_for_student()` monkeypatched for deterministic coverage independent of the real model's actual predictions.
+- `tests/test_backup.py` (4 tests) — every table present (even when empty), real data included, and `password_hash` excluded from both data and header.
+- `tests/test_promotion.py` (6 tests) — semester promotion moves only matching active students, leaves other semesters/inactive students untouched, and enforces Admin-only + the max-semester guard.
+- `tests/test_class_report.py` (3 tests) — structural PDF validity (a real PDF, no crash on an empty database, semester filter changes the output) — the report's actual numbers are already covered by the analytics/at-risk-report tests it reuses.
 
 ## Database design
 
-7 tables (`users`, `students`, `subjects`, `marks`, `attendance`,
-`semesters`, `audit_log`), all normalised to **3NF**: atomic columns
+9 tables (`users`, `students`, `subjects`, `marks`, `attendance`,
+`assignments`, `teacher_subjects`, `semesters`, `audit_log`), all normalised to **3NF**: atomic columns
 (1NF), every column depends on the whole primary key including composite
 keys like `semesters(roll_no, semester)` (2NF), and no column depends on
 another non-key column instead of the key (3NF) — see the extensive
@@ -242,8 +279,6 @@ in `ml/results/*.csv`.
 
 ## Known limitations (documented deliberately, not discovered by accident)
 
-- **No teacher-to-subject assignment table**: any Teacher account can
-  currently enter marks/attendance for any subject.
 - **The default admin password is hardcoded and visible in source** (see
   "Default admin login" above). This is now mitigated going FORWARD --
   `modules/auth.py`'s `create_user()` defaults every Admin-created (and
@@ -256,6 +291,12 @@ in `ml/results/*.csv`.
   already-existing account's password was ever actually changed.
   Anyone still using the original default password should use the new
   "Change Password" page immediately.
+- **The full database backup (`utils/backup.py`) is export-only**: there
+  is no "upload a backup to restore it" counterpart. Restoring a full
+  backup safely (foreign key ordering, conflicting primary keys, partial
+  failures partway through) is a meaningfully different and higher-risk
+  piece of work than this project's bulk import, which only ever adds
+  new, individually-validated rows — deliberately out of scope here.
 - **RandomForestClassifier and Windows Smart App Control**: on the
   development machine, a Windows security policy blocked one unrelated,
   unused scikit-learn submodule (`HistGradientBoosting*`) in a way that
