@@ -30,6 +30,12 @@ Pandas | NumPy | Plotly | scikit-learn | joblib | bcrypt | ReportLab | pytest
 | 14 | PDF report card export (incl. ML predictions) | `utils/pdf_generator.py` |
 | 15 | Audit log viewer (Admin only) | `modules/audit.py` |
 | 16 | Student-facing "My Performance" portal | `modules/student_portal.py` |
+| 17 | Bulk CSV/Excel import with a validation preview before committing | `utils/bulk_import.py` |
+| 18 | CSV/Excel export, search, and pagination on every data table | `utils/table_view.py` |
+| 19 | Visual "Dashboard" page: KPI cards, at-risk count, attendance shortage alerts, spotlight cards, charts | `modules/analytics.py` |
+| 20 | Class rank and percentile per student | `modules/analytics.py` |
+| 21 | Student-vs-class comparative analytics | `modules/analytics.py` |
+| 22 | Change password, with a forced change on a freshly created or admin-reset account | `modules/auth.py` |
 
 ### Beyond the original 13-module spec
 
@@ -45,6 +51,13 @@ to real usage:
 - **Assignments are a real, tracked feature**, not a number typed in by
   hand every time a prediction is requested (see `modules/assignments.py`
   and `modules/ml_predictions.py`'s `_compute_assignment_engagement()`).
+- **Bulk import, export, search/pagination, rank/percentile, attendance
+  shortage alerts, forced password change, and comparative analytics**:
+  see `utils/bulk_import.py`, `utils/table_view.py`, and the rank/
+  shortage/comparison functions in `modules/analytics.py`. The at-risk
+  KPI on the Dashboard runs the real trained classifier for every active
+  student (not a cheaper proxy), cached 5 minutes given the added
+  Turso round-trips -- see `ml_predictions.get_at_risk_count()`.
 - **Google Sign-In**: prepared but not yet wired up -- requires OAuth
   credentials from Google Cloud Console, which only the project owner can
   create.
@@ -82,14 +95,20 @@ student_performance_system/
 │   ├── validators.py          # validation layer, checked before every DB write
 │   ├── exceptions.py          # domain-specific exception classes
 │   ├── logger.py              # logging configuration (writes to logs/app.log)
-│   └── pdf_generator.py       # report card PDF builder + trigger page
+│   ├── pdf_generator.py       # report card PDF builder + trigger page
+│   ├── table_view.py          # search/paginate/export -- shared by every data table
+│   └── bulk_import.py         # CSV/Excel bulk import with a validation preview
 ├── .streamlit/
 │   ├── config.toml            # light/dark theme (tracked)
 │   └── secrets.toml           # Turso credentials (gitignored -- never commit this)
 ├── tests/
 │   ├── test_validators.py
 │   ├── test_grades.py
-│   └── test_database.py
+│   ├── test_database.py
+│   ├── test_auth.py
+│   ├── test_analytics.py
+│   ├── test_table_view.py
+│   └── test_bulk_import.py
 └── logs/
     └── app.log                # created at runtime (gitignored)
 ```
@@ -154,10 +173,14 @@ here; change this password immediately after first login.
 python -m pytest -v
 ```
 
-90 tests across three files:
+128 tests across seven files:
 - `tests/test_validators.py` (58 tests) — every validation rule, including boundary values.
 - `tests/test_grades.py` (20 tests) — percentage/grade/SGPA/CGPA calculations, including deliberately adversarial edge cases like division-by-zero guards and off-by-one grade boundaries.
-- `tests/test_database.py` (12 tests) — CHECK/UNIQUE/FOREIGN KEY constraints and the `PRAGMA foreign_keys` setting itself, run against a throwaway temporary database (never the real `student_data.db`, and never the real Turso database either) created fresh for every test.
+- `tests/test_database.py` (13 tests) — CHECK/UNIQUE/FOREIGN KEY constraints and the `PRAGMA foreign_keys` setting itself, run against a throwaway temporary database (never the real `student_data.db`, and never the real Turso database either) created fresh for every test.
+- `tests/test_auth.py` (14 tests) — account creation defaults, self-registration, login, and the change-password/admin-reset-password flow.
+- `tests/test_analytics.py` (7 tests) — class rank/percentile (including tie handling), attendance shortage detection, and the student-vs-class comparison, each verified against hand-calculated expected values.
+- `tests/test_table_view.py` (4 tests) — CSV/Excel export round-trips, including unicode and comma-containing values.
+- `tests/test_bulk_import.py` (12 tests) — file parsing and per-row import validation, including duplicate detection both within a file and against existing records.
 
 ## Database design
 
@@ -222,8 +245,17 @@ in `ml/results/*.csv`.
 - **No teacher-to-subject assignment table**: any Teacher account can
   currently enter marks/attendance for any subject.
 - **The default admin password is hardcoded and visible in source** (see
-  "Default admin login" above) — acceptable for a bootstrap-only account
-  on a fresh install, not for a production deployment.
+  "Default admin login" above). This is now mitigated going FORWARD --
+  `modules/auth.py`'s `create_user()` defaults every Admin-created (and
+  the bootstrap) account to `must_change_password=1`, which forces a
+  password change on first login before anything else is reachable (see
+  `app.py`'s `render_authenticated_view()`). It does **not** retroactively
+  force a change on an admin account that already existed before this
+  feature was added and had never changed its password -- a schema
+  migration can add the flag, but it cannot know whether a given
+  already-existing account's password was ever actually changed.
+  Anyone still using the original default password should use the new
+  "Change Password" page immediately.
 - **RandomForestClassifier and Windows Smart App Control**: on the
   development machine, a Windows security policy blocked one unrelated,
   unused scikit-learn submodule (`HistGradientBoosting*`) in a way that
