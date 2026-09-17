@@ -235,6 +235,44 @@ def render_login_form() -> None:
                         st.error(str(error))
 
 
+def render_notifications_bell(user: dict) -> None:
+    """
+    A small, always-visible sidebar alert summary for Admin/Teacher:
+    "N student(s) at-risk, M below attendance threshold" -- a lightweight
+    nudge toward numbers the Dashboard page already computes
+    (analytics.get_attendance_shortage_list(), ml_predictions.
+    get_at_risk_count()), so an Admin/Teacher sees them on every page,
+    not only when they happen to open the Dashboard.
+
+    DELIBERATELY NOT A NEW ALERTING CHANNEL: this reuses the SAME
+    already-cached functions the Dashboard's KPI row and shortage panel
+    already call (see modules/analytics.py's render_dashboard_page()) --
+    no new computation, no email/push notifications (out of scope for
+    this project, see README's "Beyond the original spec" section).
+    Hidden entirely when there is nothing to flag, rather than always
+    showing "0 alerts" -- a permanent empty banner would just be visual
+    noise on every single page. Also a no-op for a Student -- these
+    numbers are about the whole class, not a fit for a Student-scoped
+    view (see modules/student_portal.py's module docstring on "my own
+    data only").
+    """
+    if user["role"] not in (config.ROLE_ADMIN, config.ROLE_TEACHER):
+        return
+
+    at_risk_count = ml_predictions.get_at_risk_count()
+    shortage_count = len(analytics.get_attendance_shortage_list())
+    total_alerts = (at_risk_count or 0) + shortage_count
+
+    if total_alerts == 0:
+        return
+
+    with st.sidebar.expander(f":material/notifications: Alerts ({total_alerts})"):
+        if at_risk_count:
+            st.warning(f"{at_risk_count} student(s) flagged at-risk. See At-Risk Prediction.")
+        if shortage_count:
+            st.warning(f"{shortage_count} student(s) below the attendance threshold. See Dashboard.")
+
+
 def render_authenticated_view(user: dict) -> None:
     """Show the sidebar menu and whichever page the user picked.
 
@@ -257,6 +295,8 @@ def render_authenticated_view(user: dict) -> None:
     if st.sidebar.button("Log Out", icon=":material/logout:", use_container_width=True):
         auth.logout()
         st.rerun()
+
+    render_notifications_bell(user)
 
     st.sidebar.divider()
 
