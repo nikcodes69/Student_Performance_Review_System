@@ -46,8 +46,13 @@ import pandas as pd
 import streamlit as st
 
 
-def _to_csv_bytes(rows: list[dict]) -> bytes:
-    """Encode a list of dicts as CSV bytes, ready for st.download_button."""
+def to_csv_bytes(rows: list[dict]) -> bytes:
+    """Encode a list of dicts as CSV bytes, ready for st.download_button.
+
+    Not underscore-prefixed, unlike _to_excel_bytes() below: this is
+    also reused directly by utils/backup.py's generate_full_backup(),
+    which needs the exact same CSV encoding for each table it packages
+    into a .zip -- see that file's module docstring."""
     return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
 
 
@@ -92,7 +97,7 @@ def render_export_buttons(rows: list[dict], filename_prefix: str, key_prefix: st
     export_cols = st.columns(2)
     with export_cols[0]:
         st.download_button(
-            "Export CSV", data=_to_csv_bytes(rows),
+            "Export CSV", data=to_csv_bytes(rows),
             file_name=f"{filename_prefix}.csv", mime="text/csv",
             key=f"{key_prefix}_export_csv", use_container_width=True,
             icon=":material/download:",

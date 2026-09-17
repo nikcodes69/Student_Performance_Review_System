@@ -1,7 +1,7 @@
 """
 tests/test_table_view.py
 =========================
-pytest tests for utils/table_view.py's export helpers (_to_csv_bytes,
+pytest tests for utils/table_view.py's export helpers (to_csv_bytes,
 _to_excel_bytes) -- the pure, reusable logic behind every "Export CSV" /
 "Export Excel" button in this app (see modules/students.py, subjects.py,
 marks.py, attendance.py, assignments.py, audit.py, auth.py, and
@@ -29,12 +29,12 @@ from io import BytesIO
 
 import pandas as pd
 
-from utils.table_view import _to_csv_bytes, _to_excel_bytes
+from utils.table_view import to_csv_bytes, _to_excel_bytes
 
 
 def test_to_csv_bytes_round_trips_exactly():
     rows = [{"roll_no": "S1", "name": "Alice"}, {"roll_no": "S2", "name": "Bob"}]
-    csv_bytes = _to_csv_bytes(rows)
+    csv_bytes = to_csv_bytes(rows)
     roundtrip = pd.read_csv(BytesIO(csv_bytes)).to_dict("records")
     assert roundtrip == rows
 
@@ -46,7 +46,7 @@ def test_to_csv_bytes_handles_unicode_and_commas():
     # would corrupt the column structure. Also covers a non-ASCII name,
     # since roll_no/name are free-text fields real students can enter.
     rows = [{"name": "Thapa, Nikhil"}, {"name": "Nguyễn Văn A"}]
-    csv_bytes = _to_csv_bytes(rows)
+    csv_bytes = to_csv_bytes(rows)
     roundtrip = pd.read_csv(BytesIO(csv_bytes)).to_dict("records")
     assert roundtrip == rows
 

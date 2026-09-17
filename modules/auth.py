@@ -63,6 +63,7 @@ from utils.exceptions import (
     RecordNotFoundError,
     ValidationError,
 )
+from utils.backup import backup_filename, generate_full_backup
 from utils.logger import get_logger
 from utils.table_view import render_data_table
 from utils.validators import validate_email, validate_password, validate_role, validate_roll_no, validate_username
@@ -850,6 +851,21 @@ def render_user_management_page() -> None:
             st.success(f"Password for '{username_choice}' has been reset.")
         except ValidationError as error:
             st.error(str(error))
+
+    st.divider()
+    st.subheader("Full Database Backup")
+    st.caption(
+        "Downloads every table in the system (students, subjects, marks, attendance, "
+        "assignments, semesters, teacher assignments, user accounts, and the audit log) "
+        "as a single .zip of CSV files. Passwords are never included in this export."
+    )
+    if st.button("Prepare Backup"):
+        backup_bytes = generate_full_backup()
+        st.download_button(
+            "Download Backup (.zip)", data=backup_bytes,
+            file_name=backup_filename(), mime="application/zip",
+            icon=":material/download:",
+        )
 
 
 if __name__ == "__main__":
