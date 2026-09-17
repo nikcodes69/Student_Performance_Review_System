@@ -181,6 +181,8 @@ def create_tables(conn) -> None:
                                   CHECK (role IN ({_quoted_list(config.VALID_ROLES)})),
                 is_active     INTEGER NOT NULL DEFAULT 1
                                   CHECK (is_active IN (0, 1)),
+                must_change_password INTEGER NOT NULL DEFAULT 0
+                                  CHECK (must_change_password IN (0, 1)),
                 created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_login    TEXT
@@ -488,16 +490,66 @@ def create_indexes(conn) -> None:
         raise DatabaseError(f"Could not create database indexes: {error}") from error
 
 
+def migrate_schema(conn) -> None:
+    """
+    Apply schema changes needed on a database that was created BEFORE a
+    given column existed.
+
+    WHY THIS FUNCTION EXISTS, SEPARATE FROM create_tables(): every
+    CREATE TABLE statement above uses "IF NOT EXISTS", which is a no-op
+    the moment the table already exists -- it does NOT retroactively add
+    a new column to a table that is already there. That is fine for a
+    brand-new install (the CREATE TABLE statement already includes the
+    new column), but this project's real, deployed Turso database already
+    has a "users" table from before "must_change_password" was added, and
+    it holds real accounts (including the live admin account) that must
+    not be touched or lost. This function's job is exactly that one
+    retrofit: add the column to a users table that predates it.
+
+    SAFE TO RUN EVERY TIME THE APP STARTS, on both a brand-new database
+    (where users already has the column, because create_tables() just
+    created it that way) and an old one (where it is missing): PRAGMA
+    table_info() is used to check whether the column is already there
+    before trying to add it, so this never runs the same ALTER TABLE
+    twice.
+
+    Args:
+        conn: Whatever get_connection() returned.
+
+    Raises:
+        DatabaseError: if the migration check or ALTER TABLE fails.
+    """
+    cursor = conn.cursor()
+    try:
+        existing_columns = {row[1] for row in cursor.execute("PRAGMA table_info(users)").fetchall()}
+        if "must_change_password" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN must_change_password "
+                "INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1))"
+            )
+            conn.commit()
+            logger.info("Migrated users table: added must_change_password column.")
+
+    except (sqlite3.Error, ValueError) as error:
+        # See create_tables()'s comment above for why ValueError is caught
+        # here too -- this function touches the same two backends.
+        conn.rollback()
+        logger.error("Failed to migrate schema: %s", error)
+        raise DatabaseError(f"Could not migrate database schema: {error}") from error
+
+
 def initialize_database() -> None:
     """
     Full setup entry point: open a connection, create all tables, create
-    all indexes, then close the connection. This is the single function
-    other code should call to make sure the database is ready to use.
+    all indexes, apply any pending schema migrations, then close the
+    connection. This is the single function other code should call to
+    make sure the database is ready to use.
     """
     conn = get_connection()
     try:
         create_tables(conn)
         create_indexes(conn)
+        migrate_schema(conn)
         logger.info("Database initialised at %s", config.DB_PATH)
     finally:
         # finally guarantees the connection is closed even if an error

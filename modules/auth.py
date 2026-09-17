@@ -131,7 +131,7 @@ def verify_password(password: str, password_hash: str) -> bool:
 # USER CREATION AND LOGIN (database-backed, no Streamlit here)
 # ---------------------------------------------------------------------------
 
-def create_user(username: str, password: str, role: str) -> int:
+def create_user(username: str, password: str, role: str, force_password_change: bool = True) -> int:
     """
     Create a new user account.
 
@@ -140,6 +140,17 @@ def create_user(username: str, password: str, role: str) -> int:
         password: The desired plaintext password (will be hashed, never
             stored in plaintext).
         role: One of config.VALID_ROLES.
+        force_password_change: If True (the default), the account is
+            created with must_change_password=1, so its first login is
+            forced through render_change_password_page() before anything
+            else in the app is reachable -- see require_login() below.
+            This default fits the common case: whoever CALLS create_user()
+            (an Admin, or the one-time bootstrap script) is choosing a
+            password FOR someone else, so that person should pick their
+            own the moment they first log in. The one case that should
+            NOT force a change is self_register_student() below, where the
+            student already chose their own password during signup -- it
+            passes force_password_change=False explicitly.
 
     Returns:
         The new user's user_id.
@@ -160,8 +171,8 @@ def create_user(username: str, password: str, role: str) -> int:
     password_hash = hash_password(password)
 
     user_id = execute_write(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-        (username, password_hash, role),
+        "INSERT INTO users (username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?)",
+        (username, password_hash, role, 1 if force_password_change else 0),
     )
 
     # We log that a user was created, and its role, but NEVER the password
@@ -220,7 +231,12 @@ def self_register_student(roll_no: str, email: str, password: str) -> int:
             "Contact an administrator if you believe this is an error."
         )
 
-    user_id = create_user(username=roll_no, password=password, role=config.ROLE_STUDENT)
+    # force_password_change=False: unlike an Admin-created account, this
+    # student already chose their own password just now -- there is no
+    # "given" password to replace on first login.
+    user_id = create_user(
+        username=roll_no, password=password, role=config.ROLE_STUDENT, force_password_change=False
+    )
     logger.info("Student '%s' self-registered a login (user_id=%s).", roll_no, user_id)
     return user_id
 
@@ -243,17 +259,19 @@ def authenticate(username: str, password: str) -> dict:
         password: The submitted plaintext password.
 
     Returns:
-        A dict with keys "user_id", "username", "role" for the
-        authenticated user. Deliberately does NOT include password_hash --
-        this dict is what gets stored in the Streamlit session and we
-        never want the hash sitting in memory longer than it needs to.
+        A dict with keys "user_id", "username", "role",
+        "must_change_password" for the authenticated user. Deliberately
+        does NOT include password_hash -- this dict is what gets stored in
+        the Streamlit session and we never want the hash sitting in memory
+        longer than it needs to.
 
     Raises:
         AuthenticationError: if the username doesn't exist, the account
             is deactivated, or the password is wrong.
     """
     user_row = fetch_one(
-        "SELECT user_id, username, password_hash, role, is_active FROM users WHERE username = ?",
+        "SELECT user_id, username, password_hash, role, is_active, must_change_password "
+        "FROM users WHERE username = ?",
         (username,),
     )
 
@@ -282,6 +300,7 @@ def authenticate(username: str, password: str) -> dict:
         "user_id": user_row["user_id"],
         "username": user_row["username"],
         "role": user_row["role"],
+        "must_change_password": bool(user_row["must_change_password"]),
     }
 
 
@@ -441,6 +460,118 @@ def reactivate_user(user_id: int, acting_user: dict) -> None:
     logger.info("User '%s' (user_id=%s) reactivated by user_id=%s.", existing["username"], user_id, acting_user["user_id"])
 
 
+def change_password(user_id: int, old_password: str, new_password: str) -> None:
+    """
+    Self-service password change: a logged-in user replaces their OWN
+    password, proving they know the current one first. This is the same
+    function used for both a voluntary change (User Management-adjacent
+    "Change Password" page) and a FORCED first-login change (see
+    require_login() below, which redirects here whenever
+    must_change_password is 1) -- there is only one code path for
+    "a password gets changed", not two.
+
+    Clears must_change_password back to 0 as part of the same UPDATE,
+    since a password that was just deliberately chosen no longer needs
+    forcing.
+
+    WHY THE AUDIT ENTRY NEVER INCLUDES THE PASSWORD OR ITS HASH, EVEN IN
+    old_value/new_value: audit_log is meant to be safely readable by an
+    Admin on the Audit Log page without ever exposing secret material --
+    a hashed password is still something we'd rather not have sitting in
+    a log table at all, on principle. Recording only the fact that a
+    change happened (and whether it cleared a forced-change flag) is
+    enough for the audit trail's purpose ("who changed what, and when").
+
+    Args:
+        user_id: The account changing its own password.
+        old_password: The current plaintext password, for verification.
+        new_password: The desired new plaintext password.
+
+    Raises:
+        RecordNotFoundError: if user_id does not exist.
+        AuthenticationError: if old_password does not match what's stored.
+        ValidationError: if new_password fails validation.
+    """
+    from modules.audit import build_audit_entry
+    from database.db_manager import execute_transaction
+
+    existing = fetch_one(
+        "SELECT user_id, username, password_hash, must_change_password FROM users WHERE user_id = ?",
+        (user_id,),
+    )
+    if existing is None:
+        raise RecordNotFoundError(f"No user found with user_id {user_id}.")
+
+    if not verify_password(old_password, existing["password_hash"]):
+        raise AuthenticationError("Current password is incorrect.")
+
+    new_password = validate_password(new_password)
+    new_hash = hash_password(new_password)
+
+    update_statement = (
+        "UPDATE users SET password_hash = ?, must_change_password = 0, "
+        "updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+        (new_hash, user_id),
+    )
+    audit_statement = build_audit_entry(
+        user_id, config.AUDIT_UPDATE, "users", str(user_id),
+        old_value={"must_change_password": bool(existing["must_change_password"])},
+        new_value={"must_change_password": False, "password_changed": True},
+    )
+    execute_transaction([update_statement, audit_statement])
+    logger.info("User '%s' (user_id=%s) changed their own password.", existing["username"], user_id)
+
+
+def admin_reset_password(user_id: int, new_password: str, acting_user: dict) -> None:
+    """
+    Admin-driven "forgot password" support: an Admin sets a NEW password
+    for someone else's account (e.g. a Teacher who is locked out), and the
+    account is forced to change it again on next login --
+    force_password_change semantics identical to a freshly created
+    account, via the same must_change_password flag. This deliberately
+    does NOT require knowing the old password (an Admin resetting a
+    forgotten password never could), which is exactly why it is a
+    separate, Admin-only function from change_password() above rather
+    than a shared one.
+
+    Args:
+        user_id: The account being reset.
+        new_password: The new plaintext password, chosen by the Admin.
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if user_id does not exist.
+        ValidationError: if new_password fails validation.
+    """
+    from modules.audit import build_audit_entry
+    from database.db_manager import execute_transaction
+
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+
+    existing = fetch_one("SELECT user_id, username FROM users WHERE user_id = ?", (user_id,))
+    if existing is None:
+        raise RecordNotFoundError(f"No user found with user_id {user_id}.")
+
+    new_password = validate_password(new_password)
+    new_hash = hash_password(new_password)
+
+    update_statement = (
+        "UPDATE users SET password_hash = ?, must_change_password = 1, "
+        "updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+        (new_hash, user_id),
+    )
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "users", str(user_id),
+        old_value=None, new_value={"password_reset_by_admin": True},
+    )
+    execute_transaction([update_statement, audit_statement])
+    logger.info(
+        "Password for user '%s' (user_id=%s) was reset by admin user_id=%s.",
+        existing["username"], user_id, acting_user["user_id"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # STREAMLIT SESSION MANAGEMENT
 # ---------------------------------------------------------------------------
@@ -573,6 +704,59 @@ def require_role(*allowed_roles: str) -> dict:
     return user
 
 
+def render_change_password_page(forced: bool = False) -> None:
+    """
+    Streamlit page/panel: the logged-in user changes their own password.
+
+    Used two ways by app.py:
+      - forced=True: shown INSTEAD of the normal sidebar/page routing,
+        the moment a user with must_change_password=1 logs in (a freshly
+        Admin-created account, or the bootstrap admin -- see
+        create_user()'s force_password_change parameter). There is no way
+        to reach any other page until this succeeds.
+      - forced=False: a normal, voluntary "Change Password" page anyone
+        can visit any time from the sidebar, same underlying form and
+        change_password() call.
+
+    Args:
+        forced: Changes only the page's wording (why the user is seeing
+            this) -- the actual logic is identical either way.
+    """
+    user = require_login()
+
+    st.title("Change Password")
+    if forced:
+        st.warning(
+            "You must set a new password before continuing. "
+            "This account was created with a temporary password."
+        )
+    else:
+        st.caption("Change your own account password.")
+
+    with st.form("change_password_form", clear_on_submit=True):
+        old_password = st.text_input("Current Password", type="password")
+        new_password = st.text_input("New Password", type="password")
+        confirm_password = st.text_input("Confirm New Password", type="password")
+        submitted = st.form_submit_button("Change Password", type="primary")
+
+    if submitted:
+        if new_password != confirm_password:
+            st.error("New passwords do not match.")
+        else:
+            try:
+                change_password(user["user_id"], old_password, new_password)
+                # Keep the in-session user dict consistent with the
+                # database we just updated -- otherwise the forced-change
+                # gate in app.py would keep re-showing this page every
+                # rerun, since it reads must_change_password straight from
+                # st.session_state, not a fresh database query.
+                st.session_state[SESSION_KEY_USER]["must_change_password"] = False
+                st.success("Password changed successfully.")
+                st.rerun()
+            except (AuthenticationError, ValidationError) as error:
+                st.error(str(error))
+
+
 def render_user_management_page() -> None:
     """
     Streamlit page: Admin creates Teacher/Admin/Student login accounts by
@@ -650,6 +834,22 @@ def render_user_management_page() -> None:
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
+
+    st.subheader("Reset a forgotten password")
+    st.caption(
+        "Sets a new password for the selected account and forces them to "
+        "change it again the next time they log in."
+    )
+    with st.form("reset_password_form", clear_on_submit=True):
+        reset_new_password = st.text_input("New temporary password", type="password")
+        reset_submitted = st.form_submit_button("Reset Password")
+
+    if reset_submitted:
+        try:
+            admin_reset_password(selected_user["user_id"], reset_new_password, current_user)
+            st.success(f"Password for '{username_choice}' has been reset.")
+        except ValidationError as error:
+            st.error(str(error))
 
 
 if __name__ == "__main__":

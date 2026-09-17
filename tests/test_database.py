@@ -162,6 +162,16 @@ def test_students_semester_check_constraint(test_db):
         )
 
 
+def test_users_must_change_password_check_constraint(test_db):
+    # See modules/auth.py's change-password feature: must_change_password
+    # is a 0/1 flag, same CHECK pattern as is_active on this same table.
+    with pytest.raises(sqlite3.IntegrityError):
+        test_db.execute(
+            "INSERT INTO users (username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?)",
+            ("baduser2", "somehash", "student", 2),
+        )
+
+
 def test_users_role_check_constraint(test_db):
     with pytest.raises(sqlite3.IntegrityError):
         test_db.execute(

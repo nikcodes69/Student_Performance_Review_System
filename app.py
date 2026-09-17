@@ -70,6 +70,7 @@ HOME_SECTIONS = [
     ("Audit Log", ":material/history:", (config.ROLE_ADMIN,), "Full history of every change"),
     ("User Management", ":material/manage_accounts:", (config.ROLE_ADMIN,), "Create Teacher/Admin accounts"),
     ("My Performance", ":material/person:", (config.ROLE_STUDENT,), "Your own marks, attendance, and predictions"),
+    ("Change Password", ":material/password:", config.VALID_ROLES, "Update your own login password"),
 ]
 
 
@@ -135,6 +136,7 @@ PAGES = {
     "Audit Log": ((config.ROLE_ADMIN,), audit.render_audit_log_page),
     "User Management": ((config.ROLE_ADMIN,), auth.render_user_management_page),
     "My Performance": ((config.ROLE_STUDENT,), student_portal.render_student_portal_page),
+    "Change Password": (config.VALID_ROLES, auth.render_change_password_page),
 }
 
 # Icon per sidebar entry, reusing HOME_SECTIONS' icon choices (plus Home's
@@ -232,7 +234,21 @@ def render_login_form() -> None:
 
 
 def render_authenticated_view(user: dict) -> None:
-    """Show the sidebar menu and whichever page the user picked."""
+    """Show the sidebar menu and whichever page the user picked.
+
+    FORCED PASSWORD CHANGE GATE: checked first, before the sidebar
+    navigation is even built. If this account was created with
+    must_change_password=1 (a freshly Admin-created account, the
+    bootstrap admin, or one an Admin just reset -- see
+    modules/auth.py's create_user()/admin_reset_password()), the ONLY
+    thing shown is the change-password form; render_fn() for whatever
+    page is nominally selected never runs. This is what makes it a real
+    gate and not just a suggestion -- there is no menu item to click
+    around it."""
+    if user.get("must_change_password"):
+        auth.render_change_password_page(forced=True)
+        return
+
     st.sidebar.markdown(f"### :material/account_circle: {user['username']}")
     st.sidebar.caption(f"Role: {user['role'].capitalize()}")
 
