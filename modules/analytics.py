@@ -96,7 +96,9 @@ def get_dashboard_summary() -> dict:
     Returns:
         A dict: student_count, subject_count, marks_count, pass_rate
         (percentage, or None if no marks exist yet), avg_attendance
-        (percentage, or None if no attendance exists yet).
+        (percentage, or None if no attendance exists yet), class_average
+        (overall average marks percentage across every mark on file, or
+        None if no marks exist yet).
     """
     student_count = fetch_all("SELECT COUNT(*) AS c FROM students WHERE is_active = 1")[0]["c"]
     subject_count = fetch_all("SELECT COUNT(*) AS c FROM subjects WHERE is_active = 1")[0]["c"]
@@ -113,6 +115,12 @@ def get_dashboard_summary() -> dict:
         round(pass_row["passed"] / pass_row["total"] * 100, 1) if pass_row["total"] else None
     )
 
+    class_average_row = fetch_all(
+        f"SELECT AVG({PERCENTAGE_EXPR}) AS avg_pct "
+        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code"
+    )[0]
+    class_average = round(class_average_row["avg_pct"], 1) if class_average_row["avg_pct"] is not None else None
+
     attendance_row = fetch_all(
         "SELECT AVG(classes_attended * 100.0 / classes_held) AS avg_pct "
         "FROM attendance WHERE classes_held > 0"
@@ -125,6 +133,7 @@ def get_dashboard_summary() -> dict:
         "marks_count": marks_count,
         "pass_rate": pass_rate,
         "avg_attendance": avg_attendance,
+        "class_average": class_average,
     }
 
 
@@ -214,6 +223,122 @@ def get_bottom_performers(n: int = 5, semester: int | None = None) -> list[dict]
     averages = get_student_averages(semester=semester)
     averages.sort(key=lambda entry: entry["average_percentage"])
     return averages[:n]
+
+
+# ---------------------------------------------------------------------------
+# CLASS RANK AND PERCENTILE
+# ---------------------------------------------------------------------------
+
+def get_class_rankings(semester: int | None = None) -> list[dict]:
+    """
+    Every student's average percentage (see get_student_averages), ranked
+    best-first with a class rank and percentile attached.
+
+    RANKING METHOD: "competition ranking" (also called "1224" ranking) --
+    students with the EXACT SAME average percentage share the same rank,
+    and the NEXT distinct rank then skips ahead by however many students
+    tied, rather than assigning consecutive ranks to students who are, by
+    this measure, equally placed. E.g. three students tied for the
+    highest average all get rank 1, and whoever is next gets rank 4 (not
+    rank 2) -- this is the same convention real academic rank lists use,
+    and it is why the loop below tracks the PREVIOUS distinct percentage
+    rather than just using each student's position in the sorted list as
+    their rank.
+
+    PERCENTILE FORMULA: percentile = (total_students - rank) / (total_students - 1) * 100
+    -- the standard "percentile rank" definition. Rank 1 (the very top)
+    lands at the 100th percentile; the lowest rank lands at the 0th
+    percentile. With only one student, percentile is defined as 100
+    (nothing to be better than, but not left undefined either).
+
+    Args:
+        semester: If given, only marks recorded in this semester (passed
+            straight through to get_student_averages()).
+
+    Returns:
+        A list of dicts: roll_no, student_name, average_percentage, rank,
+        percentile -- sorted by rank (best first).
+    """
+    averages = get_student_averages(semester=semester)
+    averages.sort(key=lambda entry: entry["average_percentage"], reverse=True)
+
+    total = len(averages)
+    results = []
+    previous_percentage = None
+    previous_rank = 0
+
+    for index, entry in enumerate(averages, start=1):
+        if entry["average_percentage"] == previous_percentage:
+            rank = previous_rank
+        else:
+            rank = index
+        previous_percentage = entry["average_percentage"]
+        previous_rank = rank
+
+        percentile = 100.0 if total <= 1 else round((total - rank) / (total - 1) * 100, config.ROUND_DECIMALS)
+
+        results.append({
+            "roll_no": entry["roll_no"],
+            "student_name": entry["student_name"],
+            "average_percentage": entry["average_percentage"],
+            "rank": rank,
+            "total_students": total,
+            "percentile": percentile,
+        })
+
+    return results
+
+
+def get_student_rank(roll_no: str, semester: int | None = None) -> dict | None:
+    """
+    One student's own entry from get_class_rankings().
+
+    Args:
+        roll_no: The student to look up.
+        semester: If given, only marks recorded in this semester.
+
+    Returns:
+        A dict (see get_class_rankings()) or None if this student has no
+        marks yet for this selection -- there is nothing to rank.
+    """
+    roll_no = validate_roll_no(roll_no)
+    for entry in get_class_rankings(semester=semester):
+        if entry["roll_no"] == roll_no:
+            return entry
+    return None
+
+
+# ---------------------------------------------------------------------------
+# ATTENDANCE SHORTAGE ALERTS
+# ---------------------------------------------------------------------------
+
+def get_attendance_shortage_list(semester: int | None = None) -> list[dict]:
+    """
+    Every student whose AVERAGE attendance percentage, across every
+    subject they have attendance recorded for (see
+    get_student_attendance_averages()), falls below
+    config.ATTENDANCE_SHORTAGE_THRESHOLD.
+
+    WHY "AVERAGE ACROSS SUBJECTS", NOT "ANY SINGLE SUBJECT BELOW
+    THRESHOLD": modules/attendance.py's per-row 'shortage' flag already
+    answers "is this student short in THIS ONE subject", wherever a
+    single subject's attendance is shown (e.g. render_attendance_page()'s
+    table). This function answers a different, institution-wide question
+    for the Dashboard's alert panel: "which students are short OVERALL"
+    -- the number that actually determines whether a student meets a
+    college's attendance requirement to sit an exam.
+
+    Args:
+        semester: If given, only attendance recorded in this semester.
+
+    Returns:
+        A list of dicts: roll_no, student_name, average_attendance --
+        sorted worst (lowest attendance) first.
+    """
+    averages = get_student_attendance_averages(semester=semester)
+    shortage = [row for row in averages if row["average_attendance"] < config.ATTENDANCE_SHORTAGE_THRESHOLD]
+    shortage.sort(key=lambda entry: entry["average_attendance"])
+    return shortage
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +523,59 @@ def get_student_performance_trend(roll_no: str) -> list[dict]:
         "WHERE m.roll_no = ? GROUP BY m.semester ORDER BY m.semester"
     )
     return [_round_field(dict(row), "average_percentage") for row in fetch_all(query, (roll_no,))]
+
+
+# ---------------------------------------------------------------------------
+# COMPARATIVE ANALYTICS -- one student vs. the whole class, same chart
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=60)
+def get_class_average_by_semester() -> dict[int, float]:
+    """
+    Overall class average percentage (across every mark on file,
+    regardless of subject or student), grouped by semester -- the
+    "class" side of get_student_vs_class_trend()'s comparison below.
+
+    Returns:
+        A dict of {semester: average_percentage}, only for semesters that
+        have at least one mark recorded anywhere.
+    """
+    query = (
+        f"SELECT m.semester, AVG({PERCENTAGE_EXPR}) AS average_percentage "
+        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code "
+        "GROUP BY m.semester"
+    )
+    return {row["semester"]: round(row["average_percentage"], config.ROUND_DECIMALS) for row in fetch_all(query)}
+
+
+def get_student_vs_class_trend(roll_no: str) -> list[dict]:
+    """
+    One student's performance trend (see get_student_performance_trend())
+    paired, semester by semester, with the CLASS-WIDE average for that
+    same semester -- the data behind a "you vs. the class" comparison
+    line chart, used by both render_analytics_page() (Admin/Teacher,
+    picking any student) and modules/student_portal.py (a Student, always
+    pinned to their own roll_no -- see that module's docstring for why).
+
+    Args:
+        roll_no: The student to compare.
+
+    Returns:
+        A list of dicts: semester, student_percentage, class_percentage.
+        Only includes semesters the STUDENT has marks in -- a semester
+        they haven't reached yet has nothing of theirs to compare.
+    """
+    student_trend = get_student_performance_trend(roll_no)
+    class_by_semester = get_class_average_by_semester()
+
+    return [
+        {
+            "semester": row["semester"],
+            "student_percentage": row["average_percentage"],
+            "class_percentage": class_by_semester.get(row["semester"]),
+        }
+        for row in student_trend
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -668,22 +846,51 @@ def render_analytics_page() -> None:
     else:
         st.info("No marks data available yet for this selection.")
 
-    st.subheader("Individual Student Performance Trend")
+    st.subheader("Individual Student Performance Trend vs. Class Average")
     all_students = students.list_students()
     if all_students:
         student_labels = {f"{s['roll_no']} - {s['name']}": s["roll_no"] for s in all_students}
         picked_label = st.selectbox("Select a student", options=list(student_labels.keys()))
-        trend = get_student_performance_trend(student_labels[picked_label])
-        if trend:
-            fig = px.line(
-                pd.DataFrame(trend), x="semester", y="average_percentage", markers=True,
-                title=f"Performance Trend: {student_labels[picked_label]}",
+        picked_roll_no = student_labels[picked_label]
+        comparison = get_student_vs_class_trend(picked_roll_no)
+        if comparison:
+            comparison_df = pd.DataFrame(comparison)
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=comparison_df["semester"], y=comparison_df["student_percentage"],
+                mode="lines+markers", name=picked_roll_no,
+            ))
+            fig.add_trace(go.Scatter(
+                x=comparison_df["semester"], y=comparison_df["class_percentage"],
+                mode="lines+markers", name="Class Average", line=dict(dash="dash"),
+            ))
+            fig.update_layout(
+                title=f"{picked_label}: Own Average vs. Class Average",
+                xaxis_title="Semester", yaxis_title="Percentage",
             )
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No marks recorded yet for this student.")
+
+        rank_entry = get_student_rank(picked_roll_no)
+        if rank_entry:
+            rank_cols = st.columns(3)
+            rank_cols[0].metric("Class Rank", f"#{rank_entry['rank']} of {rank_entry['total_students']}")
+            rank_cols[1].metric("Percentile", f"{rank_entry['percentile']}th")
+            rank_cols[2].metric("Average Percentage", f"{rank_entry['average_percentage']}%")
     else:
         st.info("No students found.")
+
+    st.subheader("Class Rankings")
+    rankings = get_class_rankings(semester=semester)
+    if rankings:
+        rankings_df = pd.DataFrame(rankings)[
+            ["rank", "roll_no", "student_name", "average_percentage", "percentile"]
+        ]
+        rankings_df.columns = ["Rank", "Roll No", "Student", "Average %", "Percentile"]
+        st.dataframe(rankings_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No marks data available yet for this selection.")
 
 
 # ---------------------------------------------------------------------------
@@ -774,18 +981,48 @@ def render_dashboard_page() -> None:
     st.title("Dashboard")
     st.caption(f"Signed in as **{user['username']}** ({user['role'].capitalize()})")
 
+    # Lazy import: modules/ml_predictions.py is the ONLY function this
+    # read-only analytics module reaches outside plain SQL for (see the
+    # module docstring's "READ-ONLY" note) -- kept local to this one page
+    # function, rather than a top-level import, so that fact stays visible
+    # right where it's used instead of hiding in the file's import block.
+    from modules.ml_predictions import get_at_risk_count
+
     summary = get_dashboard_summary()
-    kpi_cols = st.columns(4)
+    at_risk_count = get_at_risk_count()
+
+    kpi_cols = st.columns(6)
     kpi_cols[0].metric(":material/group: Students", summary["student_count"])
-    kpi_cols[1].metric(
-        ":material/event_available: Avg. Attendance",
-        f"{summary['avg_attendance']}%" if summary["avg_attendance"] is not None else "N/A",
+    kpi_cols[1].metric(":material/menu_book: Subjects", summary["subject_count"])
+    kpi_cols[2].metric(
+        ":material/monitoring: Class Average",
+        f"{summary['class_average']}%" if summary["class_average"] is not None else "N/A",
     )
-    kpi_cols[2].metric(":material/menu_book: Subjects", summary["subject_count"])
     kpi_cols[3].metric(
         ":material/check_circle: Pass Rate",
         f"{summary['pass_rate']}%" if summary["pass_rate"] is not None else "N/A",
     )
+    kpi_cols[4].metric(
+        ":material/event_available: Avg. Attendance",
+        f"{summary['avg_attendance']}%" if summary["avg_attendance"] is not None else "N/A",
+    )
+    kpi_cols[5].metric(
+        ":material/warning: At-Risk Count",
+        at_risk_count if at_risk_count is not None else "N/A",
+        help="Active students the deployed at-risk model currently flags, evaluated at each student's own current semester.",
+    )
+
+    shortage_list = get_attendance_shortage_list()
+    if shortage_list:
+        st.divider()
+        with st.container(border=True):
+            st.markdown(
+                f":material/warning: **Attendance Shortage Alert** -- "
+                f"{len(shortage_list)} student(s) below {config.ATTENDANCE_SHORTAGE_THRESHOLD}% average attendance"
+            )
+            shortage_df = pd.DataFrame(shortage_list)[["roll_no", "student_name", "average_attendance"]]
+            shortage_df.columns = ["Roll No", "Student", "Average Attendance %"]
+            st.dataframe(shortage_df, use_container_width=True, hide_index=True)
 
     st.divider()
     st.subheader("Spotlight")

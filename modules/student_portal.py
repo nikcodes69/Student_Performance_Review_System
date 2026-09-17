@@ -27,10 +27,13 @@ the Admin/Teacher-facing pages. This file is only a new, narrower way of
 calling them -- pinned to one roll_no instead of letting the caller pick.
 """
 
+import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 import config
 from modules import auth
+from modules.analytics import get_student_rank, get_student_vs_class_trend
 from modules.attendance import list_attendance_for_student
 from modules.marks import compute_sgpa_for_marks, list_marks_for_student
 from modules.ml_predictions import (
@@ -99,6 +102,35 @@ def render_student_portal_page() -> None:
             for row in attendance_rows
         ]
         st.dataframe(display_rows, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("My Rank")
+    rank_entry = get_student_rank(roll_no)
+    if rank_entry is None:
+        st.info("No marks recorded yet -- nothing to rank.")
+    else:
+        rank_cols = st.columns(3)
+        rank_cols[0].metric("Class Rank", f"#{rank_entry['rank']} of {rank_entry['total_students']}")
+        rank_cols[1].metric("Percentile", f"{rank_entry['percentile']}th")
+        rank_cols[2].metric("My Average", f"{rank_entry['average_percentage']}%")
+
+    st.subheader("My Performance vs. Class Average")
+    comparison = get_student_vs_class_trend(roll_no)
+    if comparison:
+        comparison_df = pd.DataFrame(comparison)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=comparison_df["semester"], y=comparison_df["student_percentage"],
+            mode="lines+markers", name="Me",
+        ))
+        fig.add_trace(go.Scatter(
+            x=comparison_df["semester"], y=comparison_df["class_percentage"],
+            mode="lines+markers", name="Class Average", line=dict(dash="dash"),
+        ))
+        fig.update_layout(xaxis_title="Semester", yaxis_title="Percentage")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No marks recorded yet to compare.")
 
     st.divider()
     st.subheader("Predictions")

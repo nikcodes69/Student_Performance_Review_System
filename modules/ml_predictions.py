@@ -347,6 +347,56 @@ def predict_final_marks_for_student(roll_no: str, semester: int) -> dict:
     }
 
 
+@st.cache_data(ttl=300)
+def get_at_risk_count() -> int | None:
+    """
+    How many ACTIVE students the deployed classifier currently predicts as
+    at-risk, evaluated at each student's own current semester
+    (students.semester) -- feeds the "At-Risk Count" KPI card on the
+    Dashboard page (see modules/analytics.py's render_dashboard_page()).
+
+    WHY THIS IS CACHED FOR 5 MINUTES, NOT 60 SECONDS LIKE MOST OF
+    modules/analytics.py's DASHBOARD QUERIES: computing this means running
+    a real model prediction PER STUDENT, which itself means several
+    database round-trips per student inside _compute_live_features()
+    (their marks, attendance, and assignment records, plus their previous
+    semester's marks for improvement_rate). Against the Turso cloud
+    backend, every one of those round-trips carries real network latency
+    -- for a class of any size, doing this on every 60-second cache expiry
+    (or worse, every page load) would make the Dashboard noticeably slow.
+    A student's at-risk status also does not realistically change minute
+    to minute, so a slightly longer TTL costs nothing in practical
+    accuracy. Contrast this with get_dashboard_summary()'s pass_rate/
+    avg_attendance, which are single cheap aggregate SQL queries and so
+    can afford to refresh much more often.
+
+    Returns:
+        The number of active students currently predicted at-risk, or
+        None if the at-risk model has not been trained yet (see
+        ModelNotFoundError) -- displayed as "N/A" rather than a
+        misleading 0, exactly like get_dashboard_summary()'s pass_rate/
+        avg_attendance already do when there is no data to compute from.
+    """
+    try:
+        _get_at_risk_model()
+    except ModelNotFoundError:
+        return None
+
+    at_risk_count = 0
+    for student in students.list_students():
+        try:
+            result = predict_at_risk_for_student(student["roll_no"], student["semester"])
+        except ValidationError:
+            # No marks recorded yet for this student's current semester --
+            # nothing to predict from, so they are simply excluded from
+            # this count rather than counted as either at-risk or safe.
+            continue
+        if result["at_risk"]:
+            at_risk_count += 1
+
+    return at_risk_count
+
+
 def predict_segment_for_student(roll_no: str, semester: int) -> dict:
     """
     Assign an existing student to one of the named performance segments.
