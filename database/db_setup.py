@@ -358,6 +358,37 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # teacher_subjects
+        # ---------------------------------------------------------------
+        # A many-to-many mapping: which Teacher accounts are allowed to
+        # enter marks/attendance/assignments for which subjects. Closes a
+        # real RBAC gap this project shipped with -- before this table
+        # existed, ANY Teacher account could enter data for ANY subject
+        # (documented as a known limitation in the README). teacher_id
+        # references users.user_id rather than a separate "teachers"
+        # table, since a Teacher IS a row in users (role='teacher') --
+        # there is no separate teacher-profile table anywhere in this
+        # schema, so there is nothing else to reference.
+        #
+        # No is_active flag, unlike students/subjects: an assignment
+        # either exists or it doesn't -- "temporarily disabled" has no
+        # real-world meaning here that a straight DELETE (removing the
+        # row) doesn't already capture equally well, and the audit_log
+        # entry written alongside every INSERT/DELETE on this table (see
+        # modules/teacher_subjects.py) is what preserves the history of
+        # who was assigned when, not a soft-delete flag on the row itself.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS teacher_subjects (
+                teacher_id    INTEGER NOT NULL,
+                subject_code  TEXT NOT NULL,
+                created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (teacher_id, subject_code),
+                FOREIGN KEY (teacher_id) REFERENCES users (user_id),
+                FOREIGN KEY (subject_code) REFERENCES subjects (subject_code)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # semesters
         # ---------------------------------------------------------------
         # This table has no single-column primary key -- (roll_no,
@@ -470,6 +501,7 @@ def create_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_attendance_subject_code ON attendance (subject_code)",
         "CREATE INDEX IF NOT EXISTS idx_assignments_roll_no ON assignments (roll_no)",
         "CREATE INDEX IF NOT EXISTS idx_assignments_subject_code ON assignments (subject_code)",
+        "CREATE INDEX IF NOT EXISTS idx_teacher_subjects_subject_code ON teacher_subjects (subject_code)",
         "CREATE INDEX IF NOT EXISTS idx_semesters_roll_no ON semesters (roll_no)",
         "CREATE INDEX IF NOT EXISTS idx_audit_log_table_record "
         "ON audit_log (table_name, record_id)",

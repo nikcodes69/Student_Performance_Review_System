@@ -21,6 +21,7 @@ import config
 from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth
 from modules.audit import build_audit_entry
+from modules.teacher_subjects import render_teacher_assignment_section
 from utils.bulk_import import render_bulk_import
 from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
@@ -535,3 +536,6 @@ def render_subjects_page() -> None:
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
+
+    st.subheader("Assigned Teachers")
+    render_teacher_assignment_section(code_choice, user)

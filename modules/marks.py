@@ -6,11 +6,15 @@ student in a subject, plus the Streamlit page for it.
 
 WHO CAN WRITE MARKS: unlike students.py/subjects.py (Admin only), marks
 entry allows BOTH Admin and Teacher -- entering marks is a Teacher's
-day-to-day job in real life, not an administrative action. (This system
-has no teacher-to-subject assignment table, so any Teacher can currently
-enter marks for any subject -- there is nothing in the given schema to
-restrict that further. Worth stating plainly as a known scope limit
-rather than pretending it is enforced.)
+day-to-day job in real life, not an administrative action. A Teacher may
+only enter marks for a subject they are assigned to (see
+modules/teacher_subjects.py) -- enter_marks() and update_marks() both
+call teacher_subjects.check_teacher_subject_access() right after their
+own check_permission() call, and render_marks_page() below builds its
+subject picker from teacher_subjects.list_subjects_for_marks_entry()
+rather than subjects.list_subjects(), so a Teacher never even sees a
+subject they are not assigned to. Admin is unaffected by this check --
+see that module's docstring for the full two-layer reasoning.
 
 NO SOFT DELETE HERE: unlike students/subjects, marks has no is_active
 column and this file exposes no delete-style function at all -- see
@@ -51,7 +55,8 @@ from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth, students, subjects
 from modules.audit import build_audit_entry
 from modules.grades import calculate_sgpa, evaluate_subject_marks
-from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
+from modules.teacher_subjects import check_teacher_subject_access, list_subjects_for_marks_entry
+from utils.exceptions import AuthorizationError, DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.table_view import render_data_table
 from utils.validators import (
@@ -124,6 +129,8 @@ def enter_marks(
     semester = validate_semester(semester)
     exam_type = validate_exam_type(exam_type)
 
+    check_teacher_subject_access(acting_user, subject_code)
+
     # Confirm the student and subject actually exist (and are active)
     # BEFORE validating the mark values against the subject's own maximums
     # -- we need subject's max_internal/external/practical to do that.
@@ -190,6 +197,7 @@ def update_marks(
     auth.check_permission(acting_user["role"], MARKS_WRITE_ROLES)
 
     existing = get_marks_by_id(mark_id)
+    check_teacher_subject_access(acting_user, existing["subject_code"])
     # include_inactive=True: we must still be able to correct an old mark
     # even if the subject has since been deactivated/retired.
     subject = subjects.get_subject(existing["subject_code"], include_inactive=True)
@@ -433,9 +441,12 @@ def render_marks_page() -> None:
 
     st.title("Marks Entry")
 
-    subject_list = subjects.list_subjects()
+    subject_list = list_subjects_for_marks_entry(user)
     if not subject_list:
-        st.warning("No subjects have been configured yet. Add a subject first.")
+        if user["role"] == config.ROLE_TEACHER:
+            st.warning("You are not assigned to any subjects yet. Contact an administrator.")
+        else:
+            st.warning("No subjects have been configured yet. Add a subject first.")
         return
 
     subject_options = {f"{s['subject_code']} - {s['name']}": s for s in subject_list}
@@ -529,7 +540,7 @@ def render_marks_page() -> None:
                     saved_count += 1
                 else:
                     skipped_count += 1
-            except (ValidationError, DuplicateRecordError, RecordNotFoundError) as error:
+            except (ValidationError, DuplicateRecordError, RecordNotFoundError, AuthorizationError) as error:
                 errors.append(f"{roll_no}: {error}")
 
         if saved_count:

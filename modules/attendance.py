@@ -5,16 +5,19 @@ Attendance tracking: record and correct classes-held/classes-attended
 counts for a student in a subject, plus the Streamlit page for it.
 
 This file follows the same shape as modules/marks.py (RBAC: Admin or
-Teacher can write; no soft delete -- corrections go through an audited
-UPDATE, never a DELETE; record_id is a natural composite key, not the
-surrogate att_id, for the same reason marks.py's record_id is not
-mark_id -- att_id is only assigned after INSERT, too late for
-build_audit_entry()). One thing is different from marks.py, and mirrors
-modules/subjects.py instead: classes_attended <= classes_held is a rule
-about TWO FIELDS TOGETHER (like subjects' max_internal/external/practical
-sum), so update_attendance() validates the EFFECTIVE combination after a
-partial update, not just whichever single field changed -- see the
-comment inside update_attendance() for the same reasoning applied there.
+Teacher can write, gated additionally by modules/teacher_subjects.py's
+check_teacher_subject_access() so a Teacher can only record attendance
+for a subject they are assigned to; no soft delete -- corrections go
+through an audited UPDATE, never a DELETE; record_id is a natural
+composite key, not the surrogate att_id, for the same reason marks.py's
+record_id is not mark_id -- att_id is only assigned after INSERT, too
+late for build_audit_entry()). One thing is different from marks.py, and
+mirrors modules/subjects.py instead: classes_attended <= classes_held is
+a rule about TWO FIELDS TOGETHER (like subjects' max_internal/external/
+practical sum), so update_attendance() validates the EFFECTIVE
+combination after a partial update, not just whichever single field
+changed -- see the comment inside update_attendance() for the same
+reasoning applied there.
 
 ATTENDANCE PERCENTAGE IS NEVER STORED, for the same 3NF reason marks
 percentage is never stored (see modules/marks.py) -- it is entirely
@@ -29,7 +32,8 @@ import config
 from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth, students, subjects
 from modules.audit import build_audit_entry
-from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
+from modules.teacher_subjects import check_teacher_subject_access, list_subjects_for_marks_entry
+from utils.exceptions import AuthorizationError, DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.table_view import render_data_table
 from utils.validators import (
@@ -122,6 +126,8 @@ def record_attendance(
     semester = validate_semester(semester)
     validate_attendance_values(classes_held, classes_attended)
 
+    check_teacher_subject_access(acting_user, subject_code)
+
     students.get_student(roll_no)
     subjects.get_subject(subject_code)
 
@@ -190,6 +196,7 @@ def update_attendance(
     auth.check_permission(acting_user["role"], ATTENDANCE_WRITE_ROLES)
 
     existing = get_attendance_by_id(att_id)
+    check_teacher_subject_access(acting_user, existing["subject_code"])
 
     if classes_held is None and classes_attended is None:
         raise ValidationError("No fields were provided to update.")
@@ -345,9 +352,12 @@ def render_attendance_page() -> None:
 
     st.title("Attendance Tracking")
 
-    subject_list = subjects.list_subjects()
+    subject_list = list_subjects_for_marks_entry(user)
     if not subject_list:
-        st.warning("No subjects have been configured yet. Add a subject first.")
+        if user["role"] == config.ROLE_TEACHER:
+            st.warning("You are not assigned to any subjects yet. Contact an administrator.")
+        else:
+            st.warning("No subjects have been configured yet. Add a subject first.")
         return
 
     subject_options = {f"{s['subject_code']} - {s['name']}": s for s in subject_list}
@@ -436,7 +446,7 @@ def render_attendance_page() -> None:
                     saved_count += 1
                 else:
                     skipped_count += 1
-            except (ValidationError, DuplicateRecordError, RecordNotFoundError) as error:
+            except (ValidationError, DuplicateRecordError, RecordNotFoundError, AuthorizationError) as error:
                 errors.append(f"{roll_no}: {error}")
 
         if saved_count:

@@ -34,7 +34,8 @@ import config
 from database.db_manager import execute_transaction, fetch_all, fetch_one
 from modules import auth, students, subjects
 from modules.audit import build_audit_entry
-from utils.exceptions import DuplicateRecordError, RecordNotFoundError, ValidationError
+from modules.teacher_subjects import check_teacher_subject_access, list_subjects_for_marks_entry
+from utils.exceptions import AuthorizationError, DuplicateRecordError, RecordNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.table_view import render_data_table
 from utils.validators import (
@@ -124,6 +125,8 @@ def record_assignment(
     semester = validate_semester(semester)
     validate_assignment_values(total_assigned, submitted)
 
+    check_teacher_subject_access(acting_user, subject_code)
+
     students.get_student(roll_no)
     subjects.get_subject(subject_code)
 
@@ -189,6 +192,7 @@ def update_assignment(
     auth.check_permission(acting_user["role"], ASSIGNMENT_WRITE_ROLES)
 
     existing = get_assignment_by_id(assignment_id)
+    check_teacher_subject_access(acting_user, existing["subject_code"])
 
     if total_assigned is None and submitted is None:
         raise ValidationError("No fields were provided to update.")
@@ -356,9 +360,12 @@ def render_assignments_page() -> None:
         "a manually-typed number every time."
     )
 
-    subject_list = subjects.list_subjects()
+    subject_list = list_subjects_for_marks_entry(user)
     if not subject_list:
-        st.warning("No subjects have been configured yet. Add a subject first.")
+        if user["role"] == config.ROLE_TEACHER:
+            st.warning("You are not assigned to any subjects yet. Contact an administrator.")
+        else:
+            st.warning("No subjects have been configured yet. Add a subject first.")
         return
 
     subject_options = {f"{s['subject_code']} - {s['name']}": s for s in subject_list}
@@ -431,7 +438,7 @@ def render_assignments_page() -> None:
                     saved_count += 1
                 else:
                     skipped_count += 1
-            except (ValidationError, DuplicateRecordError, RecordNotFoundError) as error:
+            except (ValidationError, DuplicateRecordError, RecordNotFoundError, AuthorizationError) as error:
                 errors.append(f"{roll_no}: {error}")
 
         if saved_count:

@@ -213,6 +213,17 @@ RESULT_STATUSES = (RESULT_PASS, RESULT_FAIL, RESULT_PENDING)
 # records, so the true action taken when a record is deactivated is
 # 'SOFT_DELETE' (an UPDATE that flips is_active to 0), not a real SQL
 # DELETE.
+#
+# modules/teacher_subjects.py's unassign_teacher_from_subject() is the
+# one place in this project that DOES run a real SQL DELETE (that table
+# has no soft-delete concept -- an assignment either exists or it
+# doesn't). Rather than add a fourth action here, it is recorded as a
+# normal AUDIT_UPDATE with new_value=None -- adding 'DELETE' would mean
+# rebuilding audit_log's CHECK constraint (SQLite cannot ALTER a CHECK
+# constraint in place; it requires recreating the table and copying every
+# row across), which is a real risk to run against a live table already
+# holding real historical audit data, for the sake of one extra enum
+# value that new_value=None already communicates just as clearly.
 AUDIT_INSERT = "INSERT"
 AUDIT_UPDATE = "UPDATE"
 AUDIT_SOFT_DELETE = "SOFT_DELETE"
@@ -222,7 +233,10 @@ AUDIT_ACTIONS = (AUDIT_INSERT, AUDIT_UPDATE, AUDIT_SOFT_DELETE)
 # them explicitly (rather than accepting any string) catches a typo like
 # "student" instead of "students" at validation time, before it becomes a
 # confusing, silently-wrong row in audit_log.
-AUDITED_TABLES = ("students", "subjects", "marks", "attendance", "semesters", "users", "assignments")
+AUDITED_TABLES = (
+    "students", "subjects", "marks", "attendance", "semesters", "users",
+    "assignments", "teacher_subjects",
+)
 
 # ---------------------------------------------------------------------------
 # 9. MACHINE LEARNING CONFIGURATION (used in ml/ and modules/ml_predictions.py)
