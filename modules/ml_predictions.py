@@ -59,6 +59,7 @@ from modules.attendance import list_attendance_for_student
 from modules.assignments import list_assignments_for_student
 from utils.exceptions import ModelNotFoundError, ValidationError
 from utils.logger import get_logger
+from utils.table_view import render_data_table
 
 logger = get_logger(__name__)
 
@@ -397,6 +398,63 @@ def get_at_risk_count() -> int | None:
     return at_risk_count
 
 
+def get_at_risk_report() -> list[dict]:
+    """
+    Per-student at-risk predictions for every ACTIVE student, evaluated
+    at each student's own current semester -- the full, row-level detail
+    behind get_at_risk_count()'s single number. Lets Admin/Teacher see
+    WHO is flagged, not just how many, without clicking through the
+    single-student picker on render_at_risk_page() one roll_no at a time.
+
+    NOT CACHED, UNLIKE get_at_risk_count(): that function returns one
+    number shown on every Dashboard visit, so caching it protects
+    against running this same per-student loop constantly. This function
+    is only ever called on demand (a button click on the At-Risk
+    Prediction page -- see render_at_risk_page() below), so a fresh
+    cache buys little while risking a report that's a few minutes stale
+    right when someone specifically asked to see current results.
+
+    Returns:
+        A list of dicts: roll_no, student_name, semester, at_risk (bool,
+        or None if unavailable), risk_probability (float 0-1, or None),
+        status ("At Risk" / "On Track" / "No marks yet"). Sorted with
+        At Risk students first (highest risk_probability first), then
+        On Track students, then students with no marks yet to predict
+        from.
+    """
+    results = []
+    for student in students.list_students():
+        try:
+            prediction = predict_at_risk_for_student(student["roll_no"], student["semester"])
+            results.append({
+                "roll_no": student["roll_no"],
+                "student_name": student["name"],
+                "semester": student["semester"],
+                "at_risk": prediction["at_risk"],
+                "risk_probability": prediction["risk_probability"],
+                "status": "At Risk" if prediction["at_risk"] else "On Track",
+            })
+        except ValidationError:
+            # No marks recorded yet for this student's current semester
+            # -- included in the report (so nobody is silently missing
+            # from it), but clearly labelled rather than guessed at.
+            results.append({
+                "roll_no": student["roll_no"],
+                "student_name": student["name"],
+                "semester": student["semester"],
+                "at_risk": None,
+                "risk_probability": None,
+                "status": "No marks yet",
+            })
+
+    def _sort_key(row: dict) -> tuple:
+        priority = 0 if row["at_risk"] is True else 1 if row["at_risk"] is False else 2
+        return (priority, -(row["risk_probability"] or 0))
+
+    results.sort(key=_sort_key)
+    return results
+
+
 def predict_segment_for_student(roll_no: str, semester: int) -> dict:
     """
     Assign an existing student to one of the named performance segments.
@@ -494,6 +552,31 @@ def render_at_risk_page() -> None:
 
         with st.expander("Feature values used for this prediction"):
             st.json(result["features_used"])
+
+    st.divider()
+    st.subheader("Class-wide At-Risk Report")
+    st.caption(
+        "Runs the same model above for every active student at once, instead of "
+        "checking one roll number at a time."
+    )
+    if st.button("Generate Full Class Report"):
+        report = get_at_risk_report()
+        if not report:
+            st.info("No students found.")
+        else:
+            at_risk_total = sum(1 for row in report if row["at_risk"] is True)
+            st.caption(f"{at_risk_total} of {len(report)} student(s) currently flagged at-risk.")
+            display_rows = [
+                {
+                    "Roll No": row["roll_no"],
+                    "Student": row["student_name"],
+                    "Semester": row["semester"],
+                    "Status": row["status"],
+                    "Risk Probability": f"{row['risk_probability']:.1%}" if row["risk_probability"] is not None else "N/A",
+                }
+                for row in report
+            ]
+            render_data_table(display_rows, key_prefix="at_risk_report", filename_prefix="at_risk_report")
 
 
 def render_final_marks_page() -> None:
