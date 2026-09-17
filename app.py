@@ -37,7 +37,7 @@ import streamlit as st
 
 import config
 from modules import analytics, assignments, attendance, audit, auth, ml_predictions, marks, student_portal, students, subjects
-from utils.pdf_generator import render_report_card_page
+from utils.pdf_generator import render_class_report_page, render_report_card_page
 from utils.exceptions import (
     AppError,
     AuthenticationError,
@@ -67,6 +67,7 @@ HOME_SECTIONS = [
     ("Student Segmentation", ":material/scatter_plot:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Behavioural performance groups"),
     ("Model Comparison", ":material/model_training:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Metrics behind every deployed model"),
     ("Report Card", ":material/picture_as_pdf:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Downloadable PDF report card"),
+    ("Class Report", ":material/summarize:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Institution-wide PDF summary"),
     ("Audit Log", ":material/history:", (config.ROLE_ADMIN,), "Full history of every change"),
     ("User Management", ":material/manage_accounts:", (config.ROLE_ADMIN,), "Create Teacher/Admin accounts"),
     ("My Performance", ":material/person:", (config.ROLE_STUDENT,), "Your own marks, attendance, and predictions"),
@@ -133,6 +134,7 @@ PAGES = {
     "Student Segmentation": ((config.ROLE_ADMIN, config.ROLE_TEACHER), ml_predictions.render_segmentation_page),
     "Model Comparison": ((config.ROLE_ADMIN, config.ROLE_TEACHER), ml_predictions.render_model_comparison_page),
     "Report Card": ((config.ROLE_ADMIN, config.ROLE_TEACHER), render_report_card_page),
+    "Class Report": ((config.ROLE_ADMIN, config.ROLE_TEACHER), render_class_report_page),
     "Audit Log": ((config.ROLE_ADMIN,), audit.render_audit_log_page),
     "User Management": ((config.ROLE_ADMIN,), auth.render_user_management_page),
     "My Performance": ((config.ROLE_STUDENT,), student_portal.render_student_portal_page),
