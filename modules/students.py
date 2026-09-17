@@ -313,6 +313,83 @@ def reactivate_student(roll_no: str, acting_user: dict) -> None:
     logger.info("Student '%s' reactivated by user_id=%s.", roll_no, acting_user["user_id"])
 
 
+def promote_students(from_semester: int, acting_user: dict) -> list[str]:
+    """
+    Advance every ACTIVE student currently in from_semester to
+    from_semester + 1, all at once -- e.g. moving an entire class from
+    semester 1 to semester 2 at the start of a new term, instead of
+    editing each student record by hand.
+
+    WHY THIS IS ONE ATOMIC TRANSACTION FOR THE WHOLE BATCH, UNLIKE
+    utils/bulk_import.py'S PER-ROW COMMIT (WHERE ONE BAD ROW DOES NOT
+    STOP THE OTHERS): bulk import rows are independently validated
+    spreadsheet data, where a typo in one row genuinely has nothing to
+    do with any other row succeeding or failing. Promotion has no such
+    per-student validation risk -- every matching student is promoted by
+    the exact same simple, uniform rule (their current semester plus
+    one), driven entirely from data already known to be consistent (the
+    SELECT below only ever returns active students actually in
+    from_semester). A partial promotion here would be confusing, not
+    useful -- "why did half the class move to semester 2 and the other
+    half didn't" has no good answer -- so this either promotes everyone
+    matching, or (if anything at all went wrong) promotes no one.
+
+    WHY A STUDENT IN config.MAX_SEMESTER CANNOT BE PROMOTED: there is no
+    semester beyond the maximum for them to move into. A student
+    finishing the final semester is a "graduation" event, not a
+    "promotion" -- deliberately a different, out-of-scope action from
+    this function (nothing here deactivates or archives a graduating
+    student).
+
+    Args:
+        from_semester: The semester every matching active student is
+            currently in.
+        acting_user: The logged-in Admin performing this action.
+
+    Returns:
+        The roll_no of every student that was promoted, in the same
+        order list_students() returns them (possibly empty, if no active
+        student is currently in from_semester).
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        ValidationError: if from_semester is outside the valid range, or
+            is already config.MAX_SEMESTER.
+    """
+    auth.check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+    from_semester = validate_semester(from_semester)
+
+    if from_semester >= config.MAX_SEMESTER:
+        raise ValidationError(
+            f"Cannot promote students out of semester {config.MAX_SEMESTER} -- "
+            "there is no semester beyond the maximum."
+        )
+    to_semester = from_semester + 1
+
+    matching_students = list_students(semester=from_semester)
+    if not matching_students:
+        return []
+
+    statements = []
+    for student in matching_students:
+        statements.append((
+            "UPDATE students SET semester = ?, updated_at = CURRENT_TIMESTAMP WHERE roll_no = ?",
+            (to_semester, student["roll_no"]),
+        ))
+        statements.append(build_audit_entry(
+            acting_user["user_id"], config.AUDIT_UPDATE, "students", student["roll_no"],
+            old_value={"semester": from_semester}, new_value={"semester": to_semester},
+        ))
+
+    execute_transaction(statements)
+    list_students.clear()  # invalidate the cached list -- see list_students()'s docstring
+    logger.info(
+        "Promoted %s student(s) from semester %s to %s by user_id=%s.",
+        len(matching_students), from_semester, to_semester, acting_user["user_id"],
+    )
+    return [student["roll_no"] for student in matching_students]
+
+
 # ---------------------------------------------------------------------------
 # READ OPERATIONS (see module docstring for why these are not role-gated)
 # ---------------------------------------------------------------------------
@@ -568,6 +645,42 @@ def render_students_page() -> None:
             try:
                 reactivate_student(roll_no_choice, user)
                 st.success(f"Student '{roll_no_choice}' reactivated.")
+                st.rerun()
+            except ValidationError as error:
+                st.error(str(error))
+
+    st.divider()
+    st.subheader("Semester Promotion")
+    st.caption(
+        "Advance every active student in one semester to the next -- e.g. at the "
+        "start of a new term. This affects every matching student at once."
+    )
+    promote_from = st.selectbox(
+        "Promote students from semester",
+        options=range(config.MIN_SEMESTER, config.MAX_SEMESTER),  # MAX_SEMESTER itself has nowhere to promote TO
+        key="promote_from_semester",
+    )
+    affected_students = list_students(semester=int(promote_from))
+    if not affected_students:
+        st.info(f"No active students currently in semester {promote_from}.")
+    else:
+        st.write(
+            f"This will move **{len(affected_students)}** student(s) from semester "
+            f"{promote_from} to semester {promote_from + 1}:"
+        )
+        st.dataframe(
+            [{"Roll No": s["roll_no"], "Name": s["name"]} for s in affected_students],
+            use_container_width=True, hide_index=True,
+        )
+        confirm_promotion = st.checkbox(
+            f"I understand this will move all {len(affected_students)} student(s) above "
+            f"to semester {promote_from + 1}.",
+            key="confirm_promotion",
+        )
+        if st.button("Promote These Students", type="primary", disabled=not confirm_promotion):
+            try:
+                promoted = promote_students(int(promote_from), user)
+                st.success(f"Promoted {len(promoted)} student(s) to semester {promote_from + 1}.")
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
