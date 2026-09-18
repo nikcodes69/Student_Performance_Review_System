@@ -129,6 +129,61 @@ def test_authenticate_rejects_unknown_username(test_db):
 
 
 # ---------------------------------------------------------------------------
+# authenticate() with expected_role -- the security property behind
+# app.py's three role-specific login views (Admin/Teacher/Student), each
+# passing its own role in. See authenticate()'s docstring for the full
+# reasoning on why this is enforced in the SQL query itself, not as a
+# check performed after fetching the row.
+# ---------------------------------------------------------------------------
+
+def test_authenticate_with_matching_expected_role_succeeds(test_db):
+    auth.create_user("admin1", "AdminPass1!", config.ROLE_ADMIN)
+    user = auth.authenticate("admin1", "AdminPass1!", expected_role=config.ROLE_ADMIN)
+    assert user["role"] == config.ROLE_ADMIN
+
+
+def test_authenticate_rejects_correct_credentials_on_wrong_role_portal(test_db):
+    # The core property: a valid Admin username/password pair must FAIL
+    # when the Admin login view is bypassed and the Teacher portal's
+    # expected_role is passed instead -- even though the password itself
+    # is completely correct.
+    auth.create_user("admin1", "AdminPass1!", config.ROLE_ADMIN)
+    with pytest.raises(AuthenticationError):
+        auth.authenticate("admin1", "AdminPass1!", expected_role=config.ROLE_TEACHER)
+
+
+def test_authenticate_wrong_role_and_unknown_username_give_identical_message(test_db):
+    # No information leak: submitting a REAL username under the wrong
+    # role must look exactly like submitting a username that does not
+    # exist at all -- otherwise the error message itself would reveal
+    # which role a given username holds.
+    auth.create_user("admin1", "AdminPass1!", config.ROLE_ADMIN)
+
+    with pytest.raises(AuthenticationError) as wrong_role_excinfo:
+        auth.authenticate("admin1", "AdminPass1!", expected_role=config.ROLE_TEACHER)
+
+    with pytest.raises(AuthenticationError) as unknown_user_excinfo:
+        auth.authenticate("nobody_at_all", "whatever", expected_role=config.ROLE_TEACHER)
+
+    assert str(wrong_role_excinfo.value) == str(unknown_user_excinfo.value)
+
+
+def test_authenticate_with_no_expected_role_is_backward_compatible(test_db):
+    auth.create_user("teacher9", "TeachPass1!", config.ROLE_TEACHER)
+    user = auth.authenticate("teacher9", "TeachPass1!")  # no expected_role at all
+    assert user["role"] == config.ROLE_TEACHER
+
+
+def test_login_passes_expected_role_through(test_db):
+    auth.create_user("teacher10", "TeachPass1!", config.ROLE_TEACHER)
+    user = auth.login("teacher10", "TeachPass1!", expected_role=config.ROLE_TEACHER)
+    assert user["role"] == config.ROLE_TEACHER
+
+    with pytest.raises(AuthenticationError):
+        auth.login("teacher10", "TeachPass1!", expected_role=config.ROLE_ADMIN)
+
+
+# ---------------------------------------------------------------------------
 # change_password()
 # ---------------------------------------------------------------------------
 

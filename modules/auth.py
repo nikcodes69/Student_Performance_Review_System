@@ -516,22 +516,51 @@ def signup_invited_account(email: str, username: str, password: str) -> int:
     return user_id
 
 
-def authenticate(username: str, password: str) -> dict:
+def authenticate(username: str, password: str, expected_role: str | None = None) -> dict:
     """
     Verify a username/password pair and return the matching user's
     public details.
 
-    SECURITY NOTE: whether the USERNAME does not exist, or the username
+    SECURITY NOTE ON expected_role -- WHY IT IS PART OF THE QUERY ITSELF,
+    NOT A CHECK AFTERWARDS: app.py's landing page routes a visitor to one
+    of three role-specific login views (Admin/Teacher/Student), and each
+    one passes its own role here as expected_role. When given, the SQL
+    itself becomes "WHERE username = ? AND role = ?" -- so a Teacher's
+    username simply DOES NOT MATCH any row when submitted on the Admin
+    login view, even with the exact right password. This is not the same
+    as fetching the user by username alone and then comparing
+    user_row["role"] == expected_role in Python afterwards: that
+    alternative would still need a SEPARATE error message for "right
+    password, wrong portal" versus "no such user", and any observable
+    difference between those two outcomes (a different message, a
+    different response time, a different code path) is exactly the kind
+    of side channel that lets an attacker discover which roles specific
+    usernames hold -- a variant of the same "username enumeration"
+    problem explained below, just leaking ROLE instead of EXISTENCE. By
+    building the role into the WHERE clause, "wrong role" and "no such
+    user" become the literal same case from this function's point of
+    view: user_row is None either way, and the exact same branch below
+    handles both identically, with the exact same message, with no
+    extra code path to accidentally diverge from it.
+
+    SECURITY NOTE ON THE GENERIC ERROR MESSAGE: whether the username does
+    not exist, exists under a different role than expected_role, or
     exists but the PASSWORD is wrong, this function raises the exact same
     AuthenticationError message ("Invalid username or password."). If we
-    used two different messages ("no such user" vs "wrong password"), an
-    attacker could use that difference to discover which usernames are
-    real, one guess at a time -- this is a well-known attack called
-    "username enumeration". Giving away nothing extra closes that door.
+    used different messages for each case, an attacker could use those
+    differences to discover which usernames are real (and which role
+    each one holds), one guess at a time -- this is a well-known attack
+    called "username enumeration". Giving away nothing extra closes that
+    door.
 
     Args:
         username: The submitted username.
         password: The submitted plaintext password.
+        expected_role: If given, the username must belong to EXACTLY
+            this role, or authentication fails with the same generic
+            error as any other mismatch. If None (the default), any
+            role is accepted -- used by paths that do not route through
+            a role-specific login view (e.g. a future API, or tests).
 
     Returns:
         A dict with keys "user_id", "username", "role",
@@ -541,19 +570,29 @@ def authenticate(username: str, password: str) -> dict:
         longer than it needs to.
 
     Raises:
-        AuthenticationError: if the username doesn't exist, the account
-            is deactivated, or the password is wrong.
+        AuthenticationError: if the username (with the matching role, if
+            expected_role was given) doesn't exist, the account is
+            deactivated, or the password is wrong.
     """
-    user_row = fetch_one(
-        "SELECT user_id, username, password_hash, role, is_active, must_change_password "
-        "FROM users WHERE username = ?",
-        (username,),
-    )
+    if expected_role is not None:
+        user_row = fetch_one(
+            "SELECT user_id, username, password_hash, role, is_active, must_change_password "
+            "FROM users WHERE username = ? AND role = ?",
+            (username, expected_role),
+        )
+    else:
+        user_row = fetch_one(
+            "SELECT user_id, username, password_hash, role, is_active, must_change_password "
+            "FROM users WHERE username = ?",
+            (username,),
+        )
 
     generic_error = "Invalid username or password."
 
     if user_row is None:
-        logger.warning("Login failed: unknown username '%s'.", username)
+        logger.warning(
+            "Login failed: unknown username '%s' (expected_role=%s).", username, expected_role,
+        )
         raise AuthenticationError(generic_error)
 
     if not user_row["is_active"]:
@@ -1088,13 +1127,18 @@ def unlink_google_account(user_id: int, acting_user: dict) -> None:
 # STREAMLIT SESSION MANAGEMENT
 # ---------------------------------------------------------------------------
 
-def login(username: str, password: str) -> dict:
+def login(username: str, password: str, expected_role: str | None = None) -> dict:
     """
     Authenticate a user and start their Streamlit session.
 
     Args:
         username: The submitted username.
         password: The submitted plaintext password.
+        expected_role: If given, login only succeeds for this exact role
+            -- see authenticate()'s docstring for the full security
+            reasoning (this is what makes app.py's role-specific login
+            views -- Admin/Teacher/Student -- actually enforce the role
+            they claim to be for, at the database query level).
 
     Returns:
         The logged-in user's dict (user_id, username, role).
@@ -1102,7 +1146,7 @@ def login(username: str, password: str) -> dict:
     Raises:
         AuthenticationError: if the credentials are invalid (see authenticate()).
     """
-    user = authenticate(username, password)
+    user = authenticate(username, password, expected_role=expected_role)
     st.session_state[SESSION_KEY_USER] = user
     st.session_state[SESSION_KEY_LAST_ACTIVITY] = datetime.now()
     return user

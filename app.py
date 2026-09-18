@@ -11,11 +11,16 @@ Python's import path itself before running the script, so app.py can
 `import config` and `from modules import auth` directly, because app.py
 lives at the project root next to config.py.)
 
-WHAT THIS FILE DOES: shows a login form, and once logged in, a sidebar
-menu of every page the current user's role is allowed to see (the PAGES
-dict below). Each entry maps a menu label to (allowed roles, the render
-function that draws that page) -- adding a new feature module to this
-app means adding one line here, nothing else.
+WHAT THIS FILE DOES: before login, shows a landing page (project intro,
+features, an "About" section, and three role-entry cards) rather than a
+bare login form -- see render_landing_page() and the PRE-LOGIN
+NAVIGATION section below for the full session-state-driven flow between
+the landing page, each role's own login view, and the two signup views.
+Once logged in, it shows a sidebar menu of every page the current user's
+role is allowed to see (the PAGES dict below). Each PAGES entry maps a
+menu label to (allowed roles, the render function that draws that page)
+-- adding a new feature module to this app means adding one line here,
+nothing else.
 
 THE TOP-LEVEL SAFETY NET (see main() below): every individual page
 already catches the specific errors it expects (a bad form value, a
@@ -150,138 +155,319 @@ PAGES = {
 PAGE_ICONS = {"Home": ":material/home:"} | {label: icon for label, icon, _roles, _desc in HOME_SECTIONS}
 
 
-def render_login_form() -> None:
-    """
-    Show the Log In / Sign Up screens and handle any of their submissions.
+# ---------------------------------------------------------------------------
+# PRE-LOGIN NAVIGATION -- landing page, then role-specific login/signup
+# views, all navigated via st.session_state rather than Streamlit's own
+# page-routing (this app already has its own PAGES-dict routing for the
+# AUTHENTICATED side -- see render_authenticated_view() below -- so the
+# same session_state-driven pattern is reused here for consistency,
+# rather than introducing a second, different navigation mechanism just
+# for the handful of screens a visitor sees before logging in).
+# ---------------------------------------------------------------------------
 
-    TWO SEPARATE SIGN UP PATHS, NOT ONE GENERIC FORM -- see
-    modules/auth.py's module docstring ("WHO CAN CREATE AN ACCOUNT") for
-    the full reasoning: "Sign Up (Students)" self-registers against an
-    EXISTING student record (matched by roll_no + email); "Sign Up
-    (Invited)" self-registers a Teacher/Admin, but ONLY for an email an
-    Admin has already pre-approved via invite_account(). Neither path
-    lets a visitor grant themselves a role nobody already vetted them for.
+ENTRY_VIEW_KEY = "entry_view"
+VIEW_LANDING = "landing"
+VIEW_SIGNUP_STUDENT = "signup_student"
+VIEW_SIGNUP_INVITED = "signup_invited"
+# Login views are NOT given their own separate VIEW_* constants -- the
+# role string itself (config.ROLE_ADMIN/ROLE_TEACHER/ROLE_STUDENT, e.g.
+# "admin") doubles as its own view value, since it is already guaranteed
+# distinct from "landing"/"signup_student"/"signup_invited" above. This
+# is what lets render_pre_login_view() below check `view in
+# _ROLE_LOGIN_META` directly, with no separate mapping between "which
+# view string" and "which role" to keep in sync.
+
+# Display metadata for each role's login view -- title and icon, keyed by
+# the SAME config.ROLE_* constant auth.login()'s expected_role parameter
+# takes, so there is only one place that maps "which portal" to "which
+# role", not two definitions that could drift apart.
+_ROLE_LOGIN_META = {
+    config.ROLE_ADMIN: ("Admin Login", ":material/shield_person:"),
+    config.ROLE_TEACHER: ("Teacher Login", ":material/school:"),
+    config.ROLE_STUDENT: ("Student Login", ":material/person:"),
+}
+
+
+def _go_to(view: str) -> None:
+    """Switch the pre-login view and immediately rerun, so the new view
+    paints on this same click rather than one click later."""
+    st.session_state[ENTRY_VIEW_KEY] = view
+    st.rerun()
+
+
+def render_landing_page() -> None:
     """
-    # A centered, fixed-width column instead of a full-page-wide form --
-    # purely a layout choice (st.columns with unused side columns to
-    # center the middle one), no new widget behaviour.
+    The very first thing a first-time visitor sees -- NOT a bare login
+    form (see this file's module docstring's "WHAT THIS FILE DOES" for
+    why that matters: this is what an examiner, or a real institution's
+    first-time user, sees before anything else). Three role cards route
+    to a role-SPECIFIC login view (render_role_login_form()) rather than
+    one generic form asking "which role are you" -- see
+    modules/auth.py's authenticate() docstring for why that separation is
+    a real security property, not just a visual one. A separate "Request
+    an account" link goes straight to Student self-registration --
+    signup is never reachable by picking a role card labelled "Login".
+    """
+    st.title(":material/school: Student Performance Review & Prediction System")
+    st.caption(
+        "A role-based platform for managing student records, tracking attendance, "
+        "and predicting academic outcomes with machine learning."
+    )
+    st.write(
+        "This system brings together everything a college's academic office, faculty, "
+        "and students need in one place: marks and attendance records, a real-time "
+        "analytics dashboard, machine-learning-based at-risk predictions, and "
+        "downloadable report cards -- all protected by role-based access, so everyone "
+        "sees exactly what they're meant to and nothing more."
+    )
+
+    st.divider()
+    st.subheader("What this system does")
+    features = [
+        (":material/edit_note:", "Marks & Attendance", "Record and track every student's marks and attendance, semester by semester."),
+        (":material/monitoring:", "Analytics Dashboard", "Class averages, rankings, attendance trends, and pass/fail breakdowns at a glance."),
+        (":material/warning:", "At-Risk Prediction", "A trained machine learning model flags students who may need early academic support."),
+        (":material/picture_as_pdf:", "Report Cards", "Downloadable PDF report cards, including grades, SGPA, and ML predictions."),
+        (":material/group:", "Role-Based Access", "Admins, Teachers, and Students each see only the data relevant to their role."),
+        (":material/history:", "Full Audit Trail", "Every change to a student record is logged -- who changed it, and when."),
+    ]
+    feature_cols = st.columns(3)
+    for index, (icon, feature_title, description) in enumerate(features):
+        with feature_cols[index % 3]:
+            with st.container(border=True):
+                st.markdown(f"**{icon} {feature_title}**")
+                st.caption(description)
+
+    st.divider()
+    st.subheader("About")
+    st.write(
+        "Built as an 8th-semester BCA final year project, this system was designed "
+        "around real institutional workflows: strict role-based data access, an "
+        "auditable history of every change made to a student record, and machine "
+        "learning models trained specifically for early academic intervention -- "
+        "not just a digital grade book."
+    )
+
+    st.divider()
+    st.subheader("Sign in to continue")
+    role_cols = st.columns(3)
+    for col, role in zip(role_cols, (config.ROLE_ADMIN, config.ROLE_TEACHER, config.ROLE_STUDENT)):
+        title, icon = _ROLE_LOGIN_META[role]
+        with col:
+            with st.container(border=True):
+                st.markdown(f"### {icon} {role.capitalize()}")
+                if role == config.ROLE_ADMIN:
+                    st.caption("Full system access, user management, and the audit log.")
+                elif role == config.ROLE_TEACHER:
+                    st.caption("Enter marks and attendance for your assigned subjects.")
+                else:
+                    st.caption("View your own marks, attendance, and predictions.")
+                if st.button(title, use_container_width=True, key=f"landing_{role}_login", type="primary"):
+                    _go_to(role)
+
+    st.divider()
+    _left, center, _right = st.columns([1, 2, 1])
+    with center:
+        st.caption("New student? Your roll number must already be on file before you can sign up.")
+        if st.button(
+            ":material/person_add: New student? Request an account",
+            use_container_width=True, key="landing_student_signup",
+        ):
+            _go_to(VIEW_SIGNUP_STUDENT)
+
+
+def render_role_login_form(role: str) -> None:
+    """
+    A login view scoped to exactly ONE role. The role name is always
+    shown clearly (the page title itself), so there is no ambiguity
+    about which portal a visitor is in.
+
+    THE SECURITY THAT MATTERS HERE ISN'T THE LABEL, IT'S expected_role:
+    passing expected_role=role into auth.login() (see modules/auth.py's
+    authenticate() docstring for the full reasoning) is what makes a
+    valid Admin username/password combination actually FAIL when
+    submitted here on the Teacher or Student view -- the database query
+    itself only matches a row with both that username AND this role, so
+    there is no separate "is this the right portal" check for an
+    attacker to find a gap in.
+
+    Args:
+        role: One of config.ROLE_ADMIN/ROLE_TEACHER/ROLE_STUDENT.
+    """
+    title, icon = _ROLE_LOGIN_META[role]
+
     _left, center, _right = st.columns([1, 1.2, 1])
     with center:
-        st.title(":material/school: Student Performance System")
+        if st.button(":material/arrow_back: Back to Home", key=f"{role}_back"):
+            _go_to(VIEW_LANDING)
 
-        login_tab, signup_tab, invited_signup_tab = st.tabs(
-            ["Log In", "Sign Up (Students)", "Sign Up (Invited)"]
+        st.title(f"{icon} {title}")
+        st.caption(f"Sign in to the {role.capitalize()} portal.")
+
+        # st.form groups the two inputs and the button together so the
+        # page only reruns (and only tries to log in) once, when "Log
+        # In" is clicked -- not on every single keystroke in the
+        # username/password boxes, which is what would happen without
+        # a form.
+        with st.form(f"{role}_login_form"):
+            username = st.text_input("Username", placeholder="e.g. admin")
+            password = st.text_input("Password", type="password", placeholder="••••••••")
+            submitted = st.form_submit_button("Log In", use_container_width=True, type="primary")
+
+        if submitted:
+            try:
+                user = auth.login(username, password, expected_role=role)
+                st.success(f"Welcome, {user['username']}.")
+                # st.rerun() immediately restarts the script from the
+                # top. This matters because is_session_valid() (checked
+                # in main(), below) needs to run again to notice the
+                # session we JUST created above -- without this, the
+                # user would still see the login form for one extra click.
+                st.rerun()
+            except (ValidationError, AuthenticationError) as error:
+                # Both exception types produce a message written
+                # specifically to be shown to a human (see
+                # utils/validators.py and modules/auth.py) -- so
+                # str(error) is safe and appropriate to display directly.
+                st.error(str(error))
+
+        st.divider()
+        if st.button(
+            ":material/login: Sign in with Google", use_container_width=True, key=f"{role}_google_login",
+        ):
+            try:
+                st.login("google")
+            except StreamlitAuthError:
+                # Only reachable if [auth.google] isn't configured in
+                # secrets.toml (a misconfigured/undeployed setup) --
+                # st.login() validates credentials itself before
+                # redirecting anywhere (see modules/auth.py's
+                # try_google_login() docstring for the same check
+                # applied on the READ side).
+                st.error("Google Sign-In is not configured on this deployment yet.")
+
+        st.divider()
+        if role == config.ROLE_STUDENT:
+            st.caption("New student?")
+            if st.button("Request an account", use_container_width=True, key=f"{role}_signup_link"):
+                _go_to(VIEW_SIGNUP_STUDENT)
+        else:
+            st.caption("Have an invite from an Admin?")
+            if st.button("Sign up with your invite", use_container_width=True, key=f"{role}_signup_link"):
+                _go_to(VIEW_SIGNUP_INVITED)
+
+
+def render_student_signup_view() -> None:
+    """
+    Student self-registration -- see modules/auth.py's module docstring
+    ("WHO CAN CREATE AN ACCOUNT") for the full reasoning: this only
+    CLAIMS a login for a roll_no an Admin/Teacher already entered into
+    the students table, matched against the email already on file for
+    it, and is the sole self-service signup path for students.
+    """
+    _left, center, _right = st.columns([1, 1.2, 1])
+    with center:
+        if st.button(":material/arrow_back: Back to Home", key="student_signup_back"):
+            _go_to(VIEW_LANDING)
+
+        st.title(":material/person_add: Student Sign Up")
+        st.caption(
+            "Your roll number must already exist in the system (an Admin or "
+            "Teacher enters it when you're enrolled) -- this just creates YOUR "
+            "login for it."
         )
+        with st.form("signup_form", clear_on_submit=True):
+            signup_roll_no = st.text_input("Roll Number", placeholder="e.g. BCA078123")
+            signup_email = st.text_input(
+                "Email", placeholder="the email on file for your roll number",
+            )
+            signup_password = st.text_input(
+                "Choose a Password", type="password", placeholder="At least 8 characters",
+            )
+            signup_confirm = st.text_input("Confirm Password", type="password")
+            signup_submitted = st.form_submit_button(
+                "Create My Account", use_container_width=True,
+            )
 
-        with login_tab:
-            st.caption("Sign in to continue")
-
-            # st.form groups the two inputs and the button together so the
-            # page only reruns (and only tries to log in) once, when "Log
-            # In" is clicked -- not on every single keystroke in the
-            # username/password boxes, which is what would happen without
-            # a form.
-            with st.form("login_form"):
-                username = st.text_input("Username", placeholder="e.g. admin")
-                password = st.text_input("Password", type="password", placeholder="••••••••")
-                submitted = st.form_submit_button("Log In", use_container_width=True, type="primary")
-
-            if submitted:
+        if signup_submitted:
+            if signup_password != signup_confirm:
+                st.error("Passwords do not match.")
+            else:
                 try:
-                    user = auth.login(username, password)
-                    st.success(f"Welcome, {user['username']} ({user['role']}).")
-                    # st.rerun() immediately restarts the script from the
-                    # top. This matters because is_session_valid() (checked
-                    # in main(), below) needs to run again to notice the
-                    # session we JUST created above -- without this, the
-                    # user would still see the login form for one extra click.
-                    st.rerun()
-                except (ValidationError, AuthenticationError) as error:
-                    # Both exception types produce a message written
-                    # specifically to be shown to a human (see
-                    # utils/validators.py and modules/auth.py) -- so
-                    # str(error) is safe and appropriate to display directly.
+                    auth.self_register_student(signup_roll_no, signup_email, signup_password)
+                    st.success("Account created! Go back and log in as a Student.")
+                except (ValidationError, RecordNotFoundError, DuplicateRecordError) as error:
+                    # RecordNotFoundError: no such roll_no on file yet
+                    #   (an Admin/Teacher needs to create the student
+                    #   record first -- see the caption above).
+                    # ValidationError: bad email/password, or the email
+                    #   didn't match what's on file for that roll_no.
+                    # DuplicateRecordError: a login already exists for
+                    #   this roll_no.
                     st.error(str(error))
 
-            st.divider()
-            if st.button(":material/login: Sign in with Google", use_container_width=True):
+
+def render_invited_signup_view() -> None:
+    """
+    Teacher/Admin self-registration -- see modules/auth.py's module
+    docstring for why this only works for an email an existing Admin has
+    already pre-approved via invite_account().
+    """
+    _left, center, _right = st.columns([1, 1.2, 1])
+    with center:
+        if st.button(":material/arrow_back: Back to Home", key="invited_signup_back"):
+            _go_to(VIEW_LANDING)
+
+        st.title(":material/person_add: Sign Up (Invited)")
+        st.caption(
+            "For Teachers and Admins an existing Admin has already invited. "
+            "Ask an administrator to invite your email first if you don't have "
+            "an account yet -- see User Management."
+        )
+        with st.form("invited_signup_form", clear_on_submit=True):
+            invited_email = st.text_input("Your invited email")
+            invited_username = st.text_input("Choose a Username")
+            invited_password = st.text_input(
+                "Choose a Password", type="password", placeholder="At least 8 characters",
+            )
+            invited_confirm = st.text_input("Confirm Password", type="password")
+            invited_submitted = st.form_submit_button(
+                "Create My Account", use_container_width=True,
+            )
+
+        if invited_submitted:
+            if invited_password != invited_confirm:
+                st.error("Passwords do not match.")
+            else:
                 try:
-                    st.login("google")
-                except StreamlitAuthError:
-                    # Only reachable if [auth.google] isn't configured in
-                    # secrets.toml (a misconfigured/undeployed setup) --
-                    # st.login() validates credentials itself before
-                    # redirecting anywhere (see modules/auth.py's
-                    # try_google_login() docstring for the same check
-                    # applied on the READ side).
-                    st.error("Google Sign-In is not configured on this deployment yet.")
+                    auth.signup_invited_account(invited_email, invited_username, invited_password)
+                    st.success("Account created! Go back and log in.")
+                except (ValidationError, RecordNotFoundError, DuplicateRecordError) as error:
+                    # RecordNotFoundError: no pending invite for this
+                    #   email (an Admin needs to invite it first).
+                    # ValidationError: bad username/password.
+                    # DuplicateRecordError: that username is already taken.
+                    st.error(str(error))
 
-        with signup_tab:
-            st.caption(
-                "For students only. Your roll number must already exist in the "
-                "system (an Admin or Teacher enters it when you're enrolled) -- "
-                "this just creates YOUR login for it."
-            )
-            with st.form("signup_form", clear_on_submit=True):
-                signup_roll_no = st.text_input("Roll Number", placeholder="e.g. BCA078123")
-                signup_email = st.text_input(
-                    "Email", placeholder="the email on file for your roll number",
-                )
-                signup_password = st.text_input(
-                    "Choose a Password", type="password", placeholder="At least 8 characters",
-                )
-                signup_confirm = st.text_input("Confirm Password", type="password")
-                signup_submitted = st.form_submit_button(
-                    "Create My Account", use_container_width=True,
-                )
 
-            if signup_submitted:
-                if signup_password != signup_confirm:
-                    st.error("Passwords do not match.")
-                else:
-                    try:
-                        auth.self_register_student(signup_roll_no, signup_email, signup_password)
-                        st.success("Account created. Switch to the Log In tab to sign in.")
-                    except (ValidationError, RecordNotFoundError, DuplicateRecordError) as error:
-                        # RecordNotFoundError: no such roll_no on file yet
-                        #   (an Admin/Teacher needs to create the student
-                        #   record first -- see the caption above).
-                        # ValidationError: bad email/password, or the email
-                        #   didn't match what's on file for that roll_no.
-                        # DuplicateRecordError: a login already exists for
-                        #   this roll_no.
-                        st.error(str(error))
+def render_pre_login_view() -> None:
+    """
+    Dispatch to whichever pre-login screen st.session_state[ENTRY_VIEW_KEY]
+    currently points at, defaulting to the landing page. This is the
+    ONLY place that reads ENTRY_VIEW_KEY -- every other function above
+    only ever WRITES to it, via _go_to(), then reruns immediately, so
+    this dispatch always sees the latest choice on the very next paint.
+    """
+    view = st.session_state.get(ENTRY_VIEW_KEY, VIEW_LANDING)
 
-        with invited_signup_tab:
-            st.caption(
-                "For Teachers and Admins an existing Admin has already invited. "
-                "Ask an administrator to invite your email first if you don't have "
-                "an account yet -- see User Management."
-            )
-            with st.form("invited_signup_form", clear_on_submit=True):
-                invited_email = st.text_input("Your invited email")
-                invited_username = st.text_input("Choose a Username")
-                invited_password = st.text_input(
-                    "Choose a Password", type="password", placeholder="At least 8 characters",
-                )
-                invited_confirm = st.text_input("Confirm Password", type="password")
-                invited_submitted = st.form_submit_button(
-                    "Create My Account", use_container_width=True,
-                )
-
-            if invited_submitted:
-                if invited_password != invited_confirm:
-                    st.error("Passwords do not match.")
-                else:
-                    try:
-                        auth.signup_invited_account(invited_email, invited_username, invited_password)
-                        st.success("Account created. Switch to the Log In tab to sign in.")
-                    except (ValidationError, RecordNotFoundError, DuplicateRecordError) as error:
-                        # RecordNotFoundError: no pending invite for this
-                        #   email (an Admin needs to invite it first).
-                        # ValidationError: bad username/password.
-                        # DuplicateRecordError: that username is already taken.
-                        st.error(str(error))
+    if view in _ROLE_LOGIN_META:
+        render_role_login_form(view)
+    elif view == VIEW_SIGNUP_STUDENT:
+        render_student_signup_view()
+    elif view == VIEW_SIGNUP_INVITED:
+        render_invited_signup_view()
+    else:
+        render_landing_page()
 
 
 def render_notifications_bell(user: dict) -> None:
@@ -343,6 +529,10 @@ def render_authenticated_view(user: dict) -> None:
 
     if st.sidebar.button("Log Out", icon=":material/logout:", use_container_width=True):
         auth.logout()
+        # Land back on the landing page, not whichever role-login view
+        # this same browser session last visited before logging in --
+        # logging out should feel like a fresh start, not resume mid-flow.
+        st.session_state[ENTRY_VIEW_KEY] = VIEW_LANDING
         st.rerun()
 
     render_notifications_bell(user)
@@ -399,7 +589,7 @@ def main() -> None:
     if auth.is_session_valid():
         render_authenticated_view(auth.get_current_user())
     else:
-        render_login_form()
+        render_pre_login_view()
 
 
 if __name__ == "__main__":
