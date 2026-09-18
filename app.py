@@ -52,6 +52,7 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.ui_security import block_password_clipboard
 
 logger = get_logger(__name__)
 
@@ -574,6 +575,12 @@ def render_authenticated_view(user: dict) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Student Performance System", layout="wide")
+
+    # One call here covers every password field on every page (login,
+    # signup, change password, admin create/reset) -- see
+    # utils/ui_security.py's module docstring for why a single call at
+    # the top of main() is enough, rather than one per page.
+    block_password_clipboard()
 
     # Checked on every single rerun, before anything else: if this
     # browser already has a verified Google identity (from a completed
