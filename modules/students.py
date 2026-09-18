@@ -530,6 +530,44 @@ def _validate_bulk_student_row(row: dict) -> None:
         raise DuplicateRecordError(f"A student with roll number '{roll_no}' already exists.")
 
 
+def _render_phone_input(key: str, existing_full_number: str | None = None) -> str:
+    """
+    Render a phone number field as a disabled "+977" box next to an
+    editable 10-digit local-number box -- see
+    utils.validators.validate_phone()'s docstring for why the country
+    code is fixed by the system rather than typed by the user. Shared
+    between the Add and Edit forms below so this layout is defined in
+    exactly one place, not copy-pasted twice.
+
+    Args:
+        key: Unique Streamlit widget key for this field (every widget in
+            a form needs a distinct key, same as every other field here).
+        existing_full_number: An already-stored "+977XXXXXXXXXX" value
+            to pre-fill (Edit form only) -- the "+977" prefix is
+            stripped off before showing it, since the editable box
+            should only ever contain the part the user is allowed to
+            change.
+
+    Returns:
+        Whatever the user typed into the local-number box, UNVALIDATED
+        -- the caller still passes this through validate_phone() before
+        it reaches the database, exactly like every other field here.
+    """
+    local_number = ""
+    if existing_full_number:
+        local_number = existing_full_number.removeprefix(config.PHONE_COUNTRY_CODE)
+
+    prefix_col, number_col = st.columns([1, 3])
+    with prefix_col:
+        st.text_input(
+            "Country Code", value=config.PHONE_COUNTRY_CODE, disabled=True, key=f"{key}_prefix",
+        )
+    with number_col:
+        return st.text_input(
+            "Phone Number", value=local_number, placeholder="98XXXXXXXX", key=key,
+        )
+
+
 # ---------------------------------------------------------------------------
 # STREAMLIT PAGE
 # ---------------------------------------------------------------------------
@@ -554,7 +592,7 @@ def render_students_page() -> None:
                 )
                 new_branch = st.text_input("Branch", value="BCA")
                 new_email = st.text_input("Email")
-                new_phone = st.text_input("Phone")
+                new_phone = _render_phone_input("new_phone")
                 new_admission_year = st.number_input(
                     "Admission Year",
                     min_value=config.ADMISSION_YEAR_MIN,
@@ -612,7 +650,7 @@ def render_students_page() -> None:
         )
         edit_branch = st.text_input("Branch", value=student["branch"])
         edit_email = st.text_input("Email", value=student["email"])
-        edit_phone = st.text_input("Phone", value=student["phone"])
+        edit_phone = _render_phone_input("edit_phone", existing_full_number=student["phone"])
         edit_admission_year = st.number_input(
             "Admission Year", min_value=config.ADMISSION_YEAR_MIN,
             max_value=datetime.now().year, value=student["admission_year"], step=1,

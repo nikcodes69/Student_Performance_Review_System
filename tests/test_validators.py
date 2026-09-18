@@ -211,19 +211,52 @@ def test_validate_email_rejects_missing_domain():
 # ---------------------------------------------------------------------------
 # validate_phone
 # ---------------------------------------------------------------------------
+# The "+977" country code is fixed by the system, never typed by a user
+# (see validate_phone()'s docstring) -- these tests pass in only the
+# 10-digit LOCAL number, exactly what modules/students.py's phone input
+# widget actually collects, and check that "+977" comes back attached.
 
-def test_validate_phone_accepts_valid_number():
-    assert validate_phone("9812345678") == "9812345678"
+def test_validate_phone_accepts_valid_number_starting_98():
+    assert validate_phone("9812345678") == "+9779812345678"
 
 
-def test_validate_phone_rejects_wrong_length():
+def test_validate_phone_accepts_valid_number_starting_97():
+    assert validate_phone("9741234567") == "+9779741234567"
+
+
+def test_validate_phone_rejects_wrong_length_too_short():
     with pytest.raises(ValidationError):
-        validate_phone("98123456")
+        validate_phone("98123456")  # only 8 digits
+
+
+def test_validate_phone_rejects_wrong_length_too_long():
+    with pytest.raises(ValidationError):
+        validate_phone("981234567890")  # 12 digits
 
 
 def test_validate_phone_rejects_wrong_prefix():
     with pytest.raises(ValidationError):
-        validate_phone("9512345678")  # must start with 96, 97, or 98
+        validate_phone("9512345678")  # must start with 97 or 98, not 95
+
+
+def test_validate_phone_rejects_96_prefix():
+    # A deliberate tightening from the previous 96/97/98 rule -- 96 is no
+    # longer accepted for new entries (see config.PHONE_LOCAL_REGEX).
+    with pytest.raises(ValidationError):
+        validate_phone("9612345678")
+
+
+def test_validate_phone_rejects_already_prefixed_input():
+    # Strict, not lenient -- see validate_phone()'s docstring on why a
+    # redundant "+977"/"977" pasted into the local-number field is
+    # rejected outright rather than silently stripped.
+    with pytest.raises(ValidationError):
+        validate_phone("+9779812345678")
+
+
+def test_validate_phone_rejects_non_digit_characters():
+    with pytest.raises(ValidationError):
+        validate_phone("98123 45678")  # space
 
 
 # ---------------------------------------------------------------------------

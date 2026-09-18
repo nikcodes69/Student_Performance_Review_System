@@ -119,10 +119,20 @@ ROLL_NO_MAX_LENGTH = 20
 # hard-coded "10" inside validators.py.
 PHONE_LENGTH = 10
 
+# The country code is FIXED by the system, never typed by a user -- see
+# utils.validators.validate_phone()'s docstring for the full reasoning.
+# A single constant here means the UI (the disabled "+977" box next to
+# the phone field -- see modules/students.py) and the validator (which
+# prepends this same string to whatever local number it accepts) can
+# never drift out of sync with each other.
+PHONE_COUNTRY_CODE = "+977"
+
 # Regex patterns are also "constants" -- they do not change at runtime --
 # so they live here rather than being retyped inside validators.py.
 EMAIL_REGEX = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
-PHONE_REGEX = r"^[9][6-8]\d{8}$"  # Nepali mobile numbers start with 96-98
+# The LOCAL part only (no country code -- see PHONE_COUNTRY_CODE above):
+# exactly 10 digits, starting with 97 or 98 (Nepali mobile prefixes).
+PHONE_LOCAL_REGEX = r"^(97|98)\d{8}$"
 
 # ---------------------------------------------------------------------------
 # 5. ACADEMIC STRUCTURE RULES

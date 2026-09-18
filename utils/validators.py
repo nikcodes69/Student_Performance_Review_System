@@ -295,26 +295,55 @@ def validate_email(email: str) -> str:
 
 def validate_phone(phone: str) -> str:
     """
-    Validate a phone number against config.PHONE_REGEX (a 10-digit Nepali
-    mobile number starting with 96, 97, or 98).
+    Validate the LOCAL 10-digit part of a Nepali mobile number, and
+    return the full number with config.PHONE_COUNTRY_CODE ("+977")
+    attached.
+
+    THE COUNTRY CODE IS FIXED BY THE SYSTEM, NEVER TYPED BY A USER: every
+    phone field in this app (modules/students.py's create/edit forms, and
+    the bulk-import "phone" column) only ever collects the 10-digit local
+    number -- the "+977" is shown as a separate, disabled box next to the
+    input (see render_students_page()), not part of what a person types
+    or what gets passed into this function. This function is what
+    actually attaches the prefix, so the DATABASE always stores ONE
+    consistent, unambiguous format ("+977XXXXXXXXXX") -- the same
+    principle validate_email() already applies by always lower-casing,
+    and validate_roll_no() by always upper-casing: the caller never needs
+    to guess which format is sitting in a given column, because this
+    layer normalises it once, here, on every write.
+
+    THIS FUNCTION DOES NOT TRY TO STRIP A REDUNDANT PREFIX IF ONE WAS
+    PASTED IN BY MISTAKE (e.g. "+9779812345678" or "9779812345678"): it
+    is deliberately strict, not lenient -- if the input is not EXACTLY
+    the 10-digit local part, it fails validation with a clear message,
+    rather than silently guessing what the user meant. Predictable
+    failure is easier to defend than silent "magic" reformatting.
+
+    Rules: exactly 10 digits, starting with 97 or 98 (see
+    config.PHONE_LOCAL_REGEX -- this project's Nepali mobile numbers
+    starting with 96 are no longer accepted for NEW entries, a
+    deliberate tightening of the previous 96/97/98 rule).
 
     Args:
-        phone: The raw phone number.
+        phone: The raw 10-digit local number (never includes "+977").
 
     Returns:
-        The phone number, stripped.
+        "+977" followed by the validated 10-digit number, e.g.
+        "+9779812345678".
 
     Raises:
-        ValidationError: if phone is empty or badly formatted.
+        ValidationError: if phone is empty or not exactly a 10-digit
+            number starting with 97 or 98.
     """
     phone = _require_non_empty(phone, "Phone number")
 
-    if not re.fullmatch(config.PHONE_REGEX, phone):
+    if not re.fullmatch(config.PHONE_LOCAL_REGEX, phone):
         raise ValidationError(
-            "Phone number must be a valid 10-digit mobile number starting with 96, 97, or 98."
+            "Phone number must be exactly 10 digits, starting with 97 or 98 "
+            "(do not include the +977 country code -- it's added automatically)."
         )
 
-    return phone
+    return f"{config.PHONE_COUNTRY_CODE}{phone}"
 
 
 def validate_admission_year(admission_year: int) -> int:
