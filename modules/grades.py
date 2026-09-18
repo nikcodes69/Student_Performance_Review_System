@@ -60,10 +60,11 @@ def calculate_percentage(
 
     Raises:
         ValidationError: if the total possible marks is zero (would cause
-            division by zero) -- utils/validators.py's
-            validate_max_marks_configuration() should already prevent this
-            from ever happening, but this function guards independently in
-            case it is ever called with data that skipped validation.
+            division by zero). In practice the caller always passes
+            config.MAX_INTERNAL_MARKS/MAX_EXTERNAL_MARKS/MAX_PRACTICAL_MARKS,
+            which are fixed, non-zero constants -- this guard exists for
+            callers that pass other values (e.g. tests) rather than for
+            any real code path.
     """
     total_obtained = internal + external + practical
     total_max = max_internal + max_external + max_practical

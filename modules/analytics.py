@@ -33,21 +33,22 @@ db_setup.py's module docstring for the fuller explanation of that
 distinction.
 
 WHY PERCENTAGE_EXPR MULTIPLIES BY 100.0, NOT 100: internal/external/
-practical/max_* are all stored as INTEGER columns. SQLite performs
-INTEGER division when both sides of a division are integers, silently
+practical are all stored as INTEGER columns. SQLite performs INTEGER
+division when both sides of a division are integers, silently
 truncating (83 / 100 would give 0, not 0.83). Multiplying by the FLOAT
 literal 100.0 first forces the whole expression into floating-point
 arithmetic, so the result is a real percentage like 83.0, not 0. This is
 a classic, easy-to-miss bug -- worth having a ready answer for if asked.
 
-WHY PERCENTAGE_EXPR NEVER DIVIDES BY ZERO: the denominator is
-max_internal + max_external + max_practical, which
-utils.validators.validate_max_marks_configuration() (used by every write
-in modules/subjects.py) guarantees is always greater than zero -- backed
-by the database's own CHECK constraint as a second, independent
-guarantee (see database/db_setup.py's subjects table). No subject can
-exist in this database with all three maximums at zero, so this division
-is always safe.
+WHY THE DENOMINATOR IS config.MAX_TOTAL_MARKS, NOT A JOIN TO subjects:
+every subject uses the exact same fixed marks breakdown (config.
+MAX_INTERNAL_MARKS/MAX_EXTERNAL_MARKS/MAX_PRACTICAL_MARKS -- see
+config.py), so there is no per-subject value left to look up -- the
+denominator is a single, fixed, always-positive constant, spliced in
+the same trusted-constant way database/db_setup.py's own DDL statements
+are (see that file's module docstring for why an f-string is safe here
+specifically because it only ever interpolates a developer-written
+config constant, never a value that came from a user).
 """
 
 from collections import defaultdict
@@ -69,10 +70,7 @@ from utils.validators import validate_roll_no
 
 logger = get_logger(__name__)
 
-PERCENTAGE_EXPR = (
-    "(m.internal + m.external + m.practical) * 100.0 / "
-    "(s.max_internal + s.max_external + s.max_practical)"
-)
+PERCENTAGE_EXPR = f"(m.internal + m.external + m.practical) * 100.0 / {config.MAX_TOTAL_MARKS}"
 
 
 # ---------------------------------------------------------------------------
@@ -109,17 +107,14 @@ def get_dashboard_summary() -> dict:
         f"SELECT "
         f"SUM(CASE WHEN {PERCENTAGE_EXPR} >= ? THEN 1 ELSE 0 END) AS passed, "
         f"COUNT(*) AS total "
-        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code",
+        "FROM marks m",
         (config.PASS_PERCENTAGE,),
     )[0]
     pass_rate = (
         round(pass_row["passed"] / pass_row["total"] * 100, 1) if pass_row["total"] else None
     )
 
-    class_average_row = fetch_all(
-        f"SELECT AVG({PERCENTAGE_EXPR}) AS avg_pct "
-        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code"
-    )[0]
+    class_average_row = fetch_all(f"SELECT AVG({PERCENTAGE_EXPR}) AS avg_pct FROM marks m")[0]
     class_average = round(class_average_row["avg_pct"], 1) if class_average_row["avg_pct"] is not None else None
 
     attendance_row = fetch_all(
@@ -200,7 +195,6 @@ def get_student_averages(semester: int | None = None) -> list[dict]:
         f"SELECT m.roll_no, st.name AS student_name, "
         f"AVG({PERCENTAGE_EXPR}) AS average_percentage, COUNT(*) AS subjects_count "
         "FROM marks m "
-        "JOIN subjects s ON m.subject_code = s.subject_code "
         "JOIN students st ON m.roll_no = st.roll_no"
     )
     params: list = []
@@ -479,7 +473,7 @@ def get_subject_pass_fail_breakdown(semester: int | None = None) -> list[dict]:
     """
     query = (
         "SELECT m.subject_code, s.name AS subject_name, "
-        "m.internal, m.external, m.practical, s.max_internal, s.max_external, s.max_practical "
+        "m.internal, m.external, m.practical "
         "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code"
     )
     params: list = []
@@ -491,7 +485,7 @@ def get_subject_pass_fail_breakdown(semester: int | None = None) -> list[dict]:
     for row in fetch_all(query, tuple(params)):
         percentage = calculate_percentage(
             row["internal"], row["external"], row["practical"],
-            row["max_internal"], row["max_external"], row["max_practical"],
+            config.MAX_INTERNAL_MARKS, config.MAX_EXTERNAL_MARKS, config.MAX_PRACTICAL_MARKS,
         )
         bucket = per_subject[row["subject_code"]]
         bucket["subject_name"] = row["subject_name"]
@@ -520,8 +514,7 @@ def get_student_performance_trend(roll_no: str) -> list[dict]:
 
     query = (
         f"SELECT m.semester, AVG({PERCENTAGE_EXPR}) AS average_percentage "
-        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code "
-        "WHERE m.roll_no = ? GROUP BY m.semester ORDER BY m.semester"
+        "FROM marks m WHERE m.roll_no = ? GROUP BY m.semester ORDER BY m.semester"
     )
     return [_round_field(dict(row), "average_percentage") for row in fetch_all(query, (roll_no,))]
 
@@ -543,8 +536,7 @@ def get_class_average_by_semester() -> dict[int, float]:
     """
     query = (
         f"SELECT m.semester, AVG({PERCENTAGE_EXPR}) AS average_percentage "
-        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code "
-        "GROUP BY m.semester"
+        "FROM marks m GROUP BY m.semester"
     )
     return {row["semester"]: round(row["average_percentage"], config.ROUND_DECIMALS) for row in fetch_all(query)}
 
@@ -599,11 +591,7 @@ def get_grade_distribution(semester: int | None = None) -> dict[str, int]:
         this dict always displays grades from best to worst, not
         alphabetically.
     """
-    query = (
-        "SELECT m.internal, m.external, m.practical, "
-        "s.max_internal, s.max_external, s.max_practical "
-        "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code"
-    )
+    query = "SELECT m.internal, m.external, m.practical FROM marks m"
     params: list = []
     if semester is not None:
         query += " WHERE m.semester = ?"
@@ -614,7 +602,7 @@ def get_grade_distribution(semester: int | None = None) -> dict[str, int]:
     for row in fetch_all(query, tuple(params)):
         percentage = calculate_percentage(
             row["internal"], row["external"], row["practical"],
-            row["max_internal"], row["max_external"], row["max_practical"],
+            config.MAX_INTERNAL_MARKS, config.MAX_EXTERNAL_MARKS, config.MAX_PRACTICAL_MARKS,
         )
         letter, _ = get_grade(percentage)
         distribution[letter] += 1
@@ -644,8 +632,7 @@ def get_subject_difficulty_index(semester: int | None = None) -> list[dict]:
     """
     query = (
         "SELECT m.subject_code, s.name AS subject_name, "
-        "m.internal, m.external, m.practical, "
-        "s.max_internal, s.max_external, s.max_practical "
+        "m.internal, m.external, m.practical "
         "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code"
     )
     params: list = []
@@ -658,7 +645,7 @@ def get_subject_difficulty_index(semester: int | None = None) -> list[dict]:
     for row in fetch_all(query, tuple(params)):
         percentage = calculate_percentage(
             row["internal"], row["external"], row["practical"],
-            row["max_internal"], row["max_external"], row["max_practical"],
+            config.MAX_INTERNAL_MARKS, config.MAX_EXTERNAL_MARKS, config.MAX_PRACTICAL_MARKS,
         )
         bucket = per_subject[row["subject_code"]]
         bucket["subject_name"] = row["subject_name"]
@@ -718,7 +705,6 @@ def get_attendance_marks_correlation(semester: int | None = None) -> tuple[list[
         f"{PERCENTAGE_EXPR} AS marks_percentage, "
         "a.classes_attended, a.classes_held "
         "FROM marks m "
-        "JOIN subjects s ON m.subject_code = s.subject_code "
         "JOIN attendance a ON m.roll_no = a.roll_no "
         "AND m.subject_code = a.subject_code AND m.semester = a.semester"
     )

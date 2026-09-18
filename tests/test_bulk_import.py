@@ -152,8 +152,7 @@ def test_validate_bulk_student_row_rejects_existing_roll_no(test_db):
 # ---------------------------------------------------------------------------
 
 _VALID_SUBJECT_ROW = {
-    "subject_code": "SUB100", "name": "Fixture Subject", "semester": "1",
-    "credits": "3", "max_internal": "20", "max_external": "80", "max_practical": "0",
+    "subject_code": "SUB100", "name": "Fixture Subject", "semester": "1", "credits": "3",
 }
 
 
@@ -161,17 +160,10 @@ def test_validate_bulk_subject_row_accepts_a_valid_row(test_db):
     _validate_bulk_subject_row(_VALID_SUBJECT_ROW)  # must not raise
 
 
-def test_validate_bulk_subject_row_rejects_all_zero_max_marks(test_db):
-    row = {**_VALID_SUBJECT_ROW, "max_internal": "0", "max_external": "0", "max_practical": "0"}
-    with pytest.raises(ValidationError):
-        _validate_bulk_subject_row(row)
-
-
 def test_validate_bulk_subject_row_rejects_existing_subject_code(test_db):
     execute_write(
-        "INSERT INTO subjects (subject_code, name, semester, credits, max_internal, max_external, max_practical) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("SUB100", "Existing Subject", 1, 3, 20, 80, 0),
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        ("SUB100", "Existing Subject", 1, 3),
     )
     with pytest.raises(DuplicateRecordError):
         _validate_bulk_subject_row(_VALID_SUBJECT_ROW)

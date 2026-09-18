@@ -75,9 +75,8 @@ def _insert_student(conn: sqlite3.Connection, roll_no: str) -> None:
 
 def _insert_subject(conn: sqlite3.Connection, subject_code: str) -> None:
     conn.execute(
-        "INSERT INTO subjects (subject_code, name, semester, credits, max_internal, max_external, max_practical) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (subject_code, "Fixture Subject", 1, 3, 20, 80, 0),
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        (subject_code, "Fixture Subject", 1, 3),
     )
     conn.commit()
 
@@ -140,7 +139,7 @@ def test_marks_allows_different_exam_type_for_same_subject(test_db):
     test_db.execute(
         "INSERT INTO marks (roll_no, subject_code, internal, external, practical, semester, exam_type) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("BCA003", "SUB002", 15, 60, 0, 1, "backlog"),
+        ("BCA003", "SUB002", 15, 45, 0, 1, "backlog"),
     )
     test_db.commit()
     count = test_db.execute(
@@ -180,11 +179,10 @@ def test_users_role_check_constraint(test_db):
         )
 
 
-def test_marks_internal_sanity_ceiling_check_constraint(test_db):
-    # This is the STATIC, generic 0-100 ceiling the database itself can
-    # enforce (config.MAX_MARK_CEILING) -- the precise, per-subject
-    # ceiling is utils/validators.py's job, not the database's; see
-    # database/db_setup.py's comment on the marks table.
+def test_marks_internal_ceiling_check_constraint(test_db):
+    # The marks table's CHECK constraint enforces the exact fixed ceiling
+    # (config.MAX_INTERNAL_MARKS == 25) directly -- no per-subject lookup
+    # needed now that every subject shares the same maximums.
     _insert_student(test_db, "BCA005")
     _insert_subject(test_db, "SUB003")
     with pytest.raises(sqlite3.IntegrityError):
@@ -214,15 +212,6 @@ def test_assignments_submitted_cannot_exceed_total_assigned(test_db):
             "INSERT INTO assignments (roll_no, subject_code, total_assigned, submitted, semester) "
             "VALUES (?, ?, ?, ?, ?)",
             ("BCA008", "SUB007", 5, 8, 1),
-        )
-
-
-def test_subjects_all_zero_max_marks_rejected(test_db):
-    with pytest.raises(sqlite3.IntegrityError):
-        test_db.execute(
-            "INSERT INTO subjects (subject_code, name, semester, credits, max_internal, max_external, max_practical) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            ("SUB005", "No Gradable Component", 1, 3, 0, 0, 0),
         )
 
 

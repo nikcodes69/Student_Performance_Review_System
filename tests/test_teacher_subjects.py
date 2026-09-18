@@ -57,7 +57,7 @@ def _seed_admin_teacher_and_subject():
     teacher_user = {"user_id": teacher_id, "role": config.ROLE_TEACHER, "username": "teach1"}
 
     students.create_student("S1", "Alice", 1, "BCA", "alice@example.com", "9812345678", 2024, admin_user)
-    subjects.create_subject("SUB1", "Fixture Subject", 1, 3, 20, 80, 0, admin_user)
+    subjects.create_subject("SUB1", "Fixture Subject", 1, 3, admin_user)
 
     return admin_user, teacher_user
 
@@ -143,17 +143,17 @@ def test_check_access_allows_assigned_teacher(test_db):
 def test_enter_marks_blocks_unassigned_teacher(test_db):
     _admin_user, teacher_user = _seed_admin_teacher_and_subject()
     with pytest.raises(AuthorizationError):
-        marks.enter_marks("S1", "SUB1", 15, 60, 0, 1, "regular", teacher_user)
+        marks.enter_marks("S1", "SUB1", 15, 45, 0, 1, "regular", teacher_user)
 
 
 def test_enter_marks_allows_assigned_teacher(test_db):
     admin_user, teacher_user = _seed_admin_teacher_and_subject()
     teacher_subjects.assign_teacher_to_subject(teacher_user["user_id"], "SUB1", admin_user)
-    mark_id = marks.enter_marks("S1", "SUB1", 15, 60, 0, 1, "regular", teacher_user)
+    mark_id = marks.enter_marks("S1", "SUB1", 15, 45, 0, 1, "regular", teacher_user)
     assert mark_id is not None
 
 
 def test_enter_marks_never_restricted_for_admin(test_db):
     admin_user, _teacher_user = _seed_admin_teacher_and_subject()
-    mark_id = marks.enter_marks("S1", "SUB1", 15, 60, 0, 1, "regular", admin_user)
+    mark_id = marks.enter_marks("S1", "SUB1", 15, 45, 0, 1, "regular", admin_user)
     assert mark_id is not None

@@ -81,7 +81,7 @@ def _seed_admin_teacher_student_subject(assign: bool = True):
     teacher_user = {"user_id": teacher_id, "role": config.ROLE_TEACHER, "username": "teach1"}
 
     students.create_student("S1", "Alice", 1, "BCA", "alice@example.com", "9812345678", 2024, admin_user)
-    subjects.create_subject("SUB1", "Fixture Subject", 1, 3, 20, 80, 0, admin_user)
+    subjects.create_subject("SUB1", "Fixture Subject", 1, 3, admin_user)
 
     if assign:
         teacher_subjects.assign_teacher_to_subject(teacher_id, "SUB1", admin_user)
@@ -95,7 +95,7 @@ def _seed_admin_teacher_student_subject(assign: bool = True):
 
 _MARKS_ROW = {
     "roll_no": "S1", "subject_code": "SUB1", "semester": "1", "exam_type": "regular",
-    "internal": "15", "external": "60", "practical": "0",
+    "internal": "15", "external": "45", "practical": "0",
 }
 
 
@@ -105,9 +105,9 @@ def test_validate_bulk_marks_row_blocks_unassigned_teacher(test_db):
         _validate_bulk_marks_row(_MARKS_ROW, teacher_user)
 
 
-def test_validate_bulk_marks_row_rejects_marks_over_subject_ceiling(test_db):
+def test_validate_bulk_marks_row_rejects_marks_over_ceiling(test_db):
     _admin_user, teacher_user = _seed_admin_teacher_student_subject()
-    row = {**_MARKS_ROW, "internal": "999"}  # SUB1's max_internal is 20
+    row = {**_MARKS_ROW, "internal": "999"}  # config.MAX_INTERNAL_MARKS is 25
     with pytest.raises(ValidationError):
         _validate_bulk_marks_row(row, teacher_user)
 

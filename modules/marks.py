@@ -39,13 +39,13 @@ integer would ("BCA001:CACS201:3:regular" vs. "17").
 PERCENTAGE/GRADE ARE NEVER STORED: list_marks_for_student() and
 list_marks_for_subject() below compute percentage/grade/pass-fail on the
 fly, for every row, by calling modules.grades.evaluate_subject_marks()
-with that row's OWN subject's max_internal/external/practical. Storing a
-"percentage" column on the marks table itself would make it a value that
-depends entirely on other columns in two different tables (marks and
-subjects) -- exactly the kind of redundant, derivable data 3NF asks us to
-avoid (see database/db_setup.py's normalisation notes). Computing it fresh
-every time also means it is IMPOSSIBLE for a stored percentage to go
-stale after a mark correction.
+with config.MAX_INTERNAL_MARKS/MAX_EXTERNAL_MARKS/MAX_PRACTICAL_MARKS
+(the same fixed breakdown every subject uses -- see config.py). Storing
+a "percentage" column on the marks table itself would make it a value
+that is entirely derivable from other data -- exactly the kind of
+redundant data 3NF asks us to avoid (see database/db_setup.py's
+normalisation notes). Computing it fresh every time also means it is
+IMPOSSIBLE for a stored percentage to go stale after a mark correction.
 """
 
 import streamlit as st
@@ -132,15 +132,13 @@ def enter_marks(
 
     check_teacher_subject_access(acting_user, subject_code)
 
-    # Confirm the student and subject actually exist (and are active)
-    # BEFORE validating the mark values against the subject's own maximums
-    # -- we need subject's max_internal/external/practical to do that.
+    # Confirm the student and subject actually exist (and are active).
     students.get_student(roll_no)
-    subject = subjects.get_subject(subject_code)
+    subjects.get_subject(subject_code)
 
-    internal = validate_mark_value(internal, subject["max_internal"], "internal")
-    external = validate_mark_value(external, subject["max_external"], "external")
-    practical = validate_mark_value(practical, subject["max_practical"], "practical")
+    internal = validate_mark_value(internal, config.MAX_INTERNAL_MARKS, "internal")
+    external = validate_mark_value(external, config.MAX_EXTERNAL_MARKS, "external")
+    practical = validate_mark_value(practical, config.MAX_PRACTICAL_MARKS, "practical")
 
     if get_marks_entry(roll_no, subject_code, semester, exam_type) is not None:
         raise DuplicateRecordError(
@@ -200,27 +198,31 @@ def update_marks(
     existing = get_marks_by_id(mark_id)
     check_teacher_subject_access(acting_user, existing["subject_code"])
     # include_inactive=True: we must still be able to correct an old mark
-    # even if the subject has since been deactivated/retired.
-    subject = subjects.get_subject(existing["subject_code"], include_inactive=True)
+    # even if the subject has since been deactivated/retired. The
+    # subject row itself is only used here to confirm it still exists --
+    # unlike before this project's marks structure was fixed system-wide
+    # (see config.MAX_INTERNAL_MARKS/etc.), it no longer carries the
+    # maximums each component is validated against.
+    subjects.get_subject(existing["subject_code"], include_inactive=True)
 
     set_clauses = []
     params: list = []
     new_value = {}
 
     if internal is not None:
-        internal = validate_mark_value(internal, subject["max_internal"], "internal")
+        internal = validate_mark_value(internal, config.MAX_INTERNAL_MARKS, "internal")
         set_clauses.append("internal = ?")
         params.append(internal)
         new_value["internal"] = internal
 
     if external is not None:
-        external = validate_mark_value(external, subject["max_external"], "external")
+        external = validate_mark_value(external, config.MAX_EXTERNAL_MARKS, "external")
         set_clauses.append("external = ?")
         params.append(external)
         new_value["external"] = external
 
     if practical is not None:
-        practical = validate_mark_value(practical, subject["max_practical"], "practical")
+        practical = validate_mark_value(practical, config.MAX_PRACTICAL_MARKS, "practical")
         set_clauses.append("practical = ?")
         params.append(practical)
         new_value["practical"] = practical
@@ -295,9 +297,9 @@ def list_marks_for_student(
     roll_no: str, semester: int | None = None, exam_type: str | None = None
 ) -> list[dict]:
     """
-    Fetch every marks row for one student, joined with each subject's name
-    and maximums, with percentage/grade/pass-fail computed live for each
-    row via modules.grades.evaluate_subject_marks().
+    Fetch every marks row for one student, joined with each subject's
+    name, with percentage/grade/pass-fail computed live for each row via
+    modules.grades.evaluate_subject_marks().
 
     Args:
         roll_no: The student to fetch marks for.
@@ -306,15 +308,14 @@ def list_marks_for_student(
 
     Returns:
         A list of dicts, each with the raw marks columns PLUS
-        subject_name, max_internal/external/practical, and the computed
-        "percentage", "grade_letter", "grade_point", "passed" keys.
+        subject_name and the computed "percentage", "grade_letter",
+        "grade_point", "passed" keys.
     """
     roll_no = validate_roll_no(roll_no)
 
     query = (
         "SELECT m.mark_id, m.roll_no, m.subject_code, s.name AS subject_name, "
         "m.internal, m.external, m.practical, "
-        "s.max_internal, s.max_external, s.max_practical, "
         "m.semester, m.exam_type, m.created_at, m.updated_at "
         "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code "
         "WHERE m.roll_no = ?"
@@ -347,19 +348,17 @@ def list_marks_for_subject(
 
     Returns:
         A list of dicts, each with the raw marks columns PLUS
-        student_name, max_internal/external/practical, and the computed
-        "percentage", "grade_letter", "grade_point", "passed" keys.
+        student_name and the computed "percentage", "grade_letter",
+        "grade_point", "passed" keys.
     """
     subject_code = validate_subject_code(subject_code)
 
     query = (
         "SELECT m.mark_id, m.roll_no, st.name AS student_name, m.subject_code, "
         "m.internal, m.external, m.practical, "
-        "s.max_internal, s.max_external, s.max_practical, "
         "m.semester, m.exam_type, m.created_at, m.updated_at "
         "FROM marks m "
         "JOIN students st ON m.roll_no = st.roll_no "
-        "JOIN subjects s ON m.subject_code = s.subject_code "
         "WHERE m.subject_code = ?"
     )
     params: list = [subject_code]
@@ -378,11 +377,13 @@ def list_marks_for_subject(
 
 def _with_evaluation(row: dict) -> dict:
     """Attach percentage/grade_letter/grade_point/passed to a marks row
-    dict, computed via modules.grades.evaluate_subject_marks() using that
-    row's own subject maximums. Shared by both list_* functions above."""
+    dict, computed via modules.grades.evaluate_subject_marks() using the
+    fixed marks breakdown every subject shares (config.MAX_INTERNAL_MARKS/
+    MAX_EXTERNAL_MARKS/MAX_PRACTICAL_MARKS). Shared by both list_*
+    functions above."""
     evaluation = evaluate_subject_marks(
         row["internal"], row["external"], row["practical"],
-        row["max_internal"], row["max_external"], row["max_practical"],
+        config.MAX_INTERNAL_MARKS, config.MAX_EXTERNAL_MARKS, config.MAX_PRACTICAL_MARKS,
     )
     row.update(evaluation)
     return row
@@ -436,11 +437,11 @@ def compute_sgpa_for_marks(subject_marks: list[dict]) -> float | None:
 def _validate_bulk_marks_row(row: dict, acting_user: dict) -> None:
     """
     Validate one row of a bulk marks import, run during the PREVIEW step.
-    Reuses the exact same validators AND per-subject mark-ceiling
-    validation (validate_mark_value(), which needs the subject's own
-    max_internal/external/practical) that enter_marks()/update_marks()
-    themselves use -- a row from a spreadsheet is held to identical rules
-    as one typed into the manual bulk-entry form.
+    Reuses the exact same validators AND fixed mark-ceiling validation
+    (validate_mark_value(), against config.MAX_INTERNAL_MARKS/etc.) that
+    enter_marks()/update_marks() themselves use -- a row from a
+    spreadsheet is held to identical rules as one typed into the manual
+    bulk-entry form.
 
     ALSO CHECKS TEACHER-SUBJECT ACCESS HERE, UNLIKE MOST OTHER
     _validate_bulk_*_row() FUNCTIONS: render_marks_page()'s manual entry
@@ -479,7 +480,7 @@ def _validate_bulk_marks_row(row: dict, acting_user: dict) -> None:
     check_teacher_subject_access(acting_user, subject_code)
 
     students.get_student(roll_no)
-    subject = subjects.get_subject(subject_code)
+    subjects.get_subject(subject_code)
 
     try:
         internal = int(row.get("internal", ""))
@@ -488,9 +489,9 @@ def _validate_bulk_marks_row(row: dict, acting_user: dict) -> None:
     except (TypeError, ValueError):
         raise ValidationError("internal/external/practical must all be whole numbers.")
 
-    validate_mark_value(internal, subject["max_internal"], "internal")
-    validate_mark_value(external, subject["max_external"], "external")
-    validate_mark_value(practical, subject["max_practical"], "practical")
+    validate_mark_value(internal, config.MAX_INTERNAL_MARKS, "internal")
+    validate_mark_value(external, config.MAX_EXTERNAL_MARKS, "external")
+    validate_mark_value(practical, config.MAX_PRACTICAL_MARKS, "practical")
 
 
 def _commit_bulk_marks_row(row: dict, acting_user: dict) -> None:
@@ -570,10 +571,9 @@ def render_marks_page() -> None:
         return
 
     st.caption(
-        f"Maximum marks for {selected_subject['subject_code']} -- "
-        f"Internal: {selected_subject['max_internal']}, "
-        f"External: {selected_subject['max_external']}, "
-        f"Practical: {selected_subject['max_practical']}"
+        f"Maximum marks -- Internal: {config.MAX_INTERNAL_MARKS}, "
+        f"External: {config.MAX_EXTERNAL_MARKS}, Practical: {config.MAX_PRACTICAL_MARKS} "
+        f"({config.MAX_TOTAL_MARKS} total) -- the same for every subject."
     )
 
     with st.form("marks_entry_form"):
@@ -586,19 +586,19 @@ def render_marks_page() -> None:
             mark_col1, mark_col2, mark_col3 = st.columns(3)
             with mark_col1:
                 internal_input = st.number_input(
-                    "Internal", min_value=0, max_value=selected_subject["max_internal"],
+                    "Internal", min_value=0, max_value=config.MAX_INTERNAL_MARKS,
                     value=existing_entry["internal"] if existing_entry else 0,
                     key=f"internal_{student['roll_no']}",
                 )
             with mark_col2:
                 external_input = st.number_input(
-                    "External", min_value=0, max_value=selected_subject["max_external"],
+                    "External", min_value=0, max_value=config.MAX_EXTERNAL_MARKS,
                     value=existing_entry["external"] if existing_entry else 0,
                     key=f"external_{student['roll_no']}",
                 )
             with mark_col3:
                 practical_input = st.number_input(
-                    "Practical", min_value=0, max_value=selected_subject["max_practical"],
+                    "Practical", min_value=0, max_value=config.MAX_PRACTICAL_MARKS,
                     value=existing_entry["practical"] if existing_entry else 0,
                     key=f"practical_{student['roll_no']}",
                 )

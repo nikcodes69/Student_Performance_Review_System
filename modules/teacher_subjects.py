@@ -182,13 +182,11 @@ def list_subjects_for_teacher(teacher_id: int) -> list[dict]:
         teacher_id: The Teacher account's user_id.
 
     Returns:
-        A list of dicts (subject_code, name, semester, credits,
-        max_internal, max_external, max_practical), active subjects
-        only, ordered by subject_code.
+        A list of dicts (subject_code, name, semester, credits), active
+        subjects only, ordered by subject_code.
     """
     return fetch_all(
-        "SELECT s.subject_code, s.name, s.semester, s.credits, "
-        "s.max_internal, s.max_external, s.max_practical "
+        "SELECT s.subject_code, s.name, s.semester, s.credits "
         "FROM teacher_subjects ts JOIN subjects s ON ts.subject_code = s.subject_code "
         "WHERE ts.teacher_id = ? AND s.is_active = 1 ORDER BY s.subject_code",
         (teacher_id,),

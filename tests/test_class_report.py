@@ -71,14 +71,13 @@ def test_generate_class_report_produces_a_valid_pdf_with_real_data(test_db):
         ("S1", "Alice", 1, "BCA", "alice@example.com", "9812345678", 2024),
     )
     execute_write(
-        "INSERT INTO subjects (subject_code, name, semester, credits, max_internal, max_external, max_practical) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("SUB1", "Fixture Subject", 1, 3, 20, 80, 0),
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        ("SUB1", "Fixture Subject", 1, 3),
     )
     execute_write(
         "INSERT INTO marks (roll_no, subject_code, internal, external, practical, semester, exam_type) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("S1", "SUB1", 18, 72, 0, 1, "regular"),
+        ("S1", "SUB1", 18, 45, 0, 1, "regular"),
     )
 
     pdf_bytes = generate_class_report()
@@ -92,14 +91,13 @@ def test_generate_class_report_semester_filter_changes_output_size(test_db):
         ("S1", "Alice", 1, "BCA", "alice@example.com", "9812345678", 2024),
     )
     execute_write(
-        "INSERT INTO subjects (subject_code, name, semester, credits, max_internal, max_external, max_practical) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("SUB1", "Fixture Subject", 1, 3, 20, 80, 0),
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        ("SUB1", "Fixture Subject", 1, 3),
     )
     execute_write(
         "INSERT INTO marks (roll_no, subject_code, internal, external, practical, semester, exam_type) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("S1", "SUB1", 18, 72, 0, 1, "regular"),
+        ("S1", "SUB1", 18, 45, 0, 1, "regular"),
     )
 
     # Semester 1 has real data; semester 5 (nothing recorded there) must

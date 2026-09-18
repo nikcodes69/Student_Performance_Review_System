@@ -8,11 +8,16 @@ This file mirrors modules/students.py's structure and reasoning closely
 (same RBAC split between write and read functions, same
 build_audit_entry() + execute_transaction() pattern for every write) --
 see that file's module docstring for the full explanation of why reads
-are not individually permission-checked. The one genuinely new piece of
-logic here is in update_subject(): max_internal/max_external/max_practical
-depend on EACH OTHER (their sum must be positive), so a partial update
-still has to validate the FULL resulting combination, not just whichever
-one field changed -- see the comment inside update_subject() for how.
+are not individually permission-checked.
+
+NO PER-SUBJECT MARKS CONFIGURATION: every subject uses the exact same
+fixed marks breakdown (config.MAX_INTERNAL_MARKS/MAX_EXTERNAL_MARKS/
+MAX_PRACTICAL_MARKS -- 25/50/25, 100 total), so create_subject()/
+update_subject() below no longer take max_internal/max_external/
+max_practical parameters at all -- there is nothing left to configure
+per subject. See database/db_setup.py's migrate_schema() for the
+one-time migration that dropped those columns from a database created
+before this change.
 """
 
 import streamlit as st
@@ -28,7 +33,6 @@ from utils.logger import get_logger
 from utils.table_view import render_data_table
 from utils.validators import (
     validate_credits,
-    validate_max_marks_configuration,
     validate_semester,
     validate_subject_code,
     validate_subject_name,
@@ -36,10 +40,7 @@ from utils.validators import (
 
 logger = get_logger(__name__)
 
-SUBJECT_COLUMNS = (
-    "subject_code, name, semester, credits, max_internal, max_external, max_practical, "
-    "is_active, created_at, updated_at"
-)
+SUBJECT_COLUMNS = "subject_code, name, semester, credits, is_active, created_at, updated_at"
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +52,6 @@ def create_subject(
     name: str,
     semester: int,
     credits: int,
-    max_internal: int,
-    max_external: int,
-    max_practical: int,
     acting_user: dict,
 ) -> str:
     """
@@ -64,9 +62,6 @@ def create_subject(
         name: Subject/course name.
         semester: Which semester this subject belongs to (1-8).
         credits: Credit value (config.MIN_CREDITS..MAX_CREDITS).
-        max_internal: Maximum internal marks for this subject.
-        max_external: Maximum external marks for this subject.
-        max_practical: Maximum practical marks for this subject.
         acting_user: The logged-in user performing this action.
 
     Returns:
@@ -83,22 +78,16 @@ def create_subject(
     name = validate_subject_name(name)
     semester = validate_semester(semester)
     credits = validate_credits(credits)
-    validate_max_marks_configuration(max_internal, max_external, max_practical)
 
     existing = fetch_one("SELECT subject_code FROM subjects WHERE subject_code = ?", (subject_code,))
     if existing is not None:
         raise DuplicateRecordError(f"A subject with code '{subject_code}' already exists.")
 
     insert_statement = (
-        "INSERT INTO subjects "
-        "(subject_code, name, semester, credits, max_internal, max_external, max_practical) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (subject_code, name, semester, credits, max_internal, max_external, max_practical),
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        (subject_code, name, semester, credits),
     )
-    new_value = {
-        "subject_code": subject_code, "name": name, "semester": semester, "credits": credits,
-        "max_internal": max_internal, "max_external": max_external, "max_practical": max_practical,
-    }
+    new_value = {"subject_code": subject_code, "name": name, "semester": semester, "credits": credits}
     audit_statement = build_audit_entry(
         acting_user["user_id"], config.AUDIT_INSERT, "subjects", subject_code,
         old_value=None, new_value=new_value,
@@ -116,9 +105,6 @@ def update_subject(
     name: str | None = None,
     semester: int | None = None,
     credits: int | None = None,
-    max_internal: int | None = None,
-    max_external: int | None = None,
-    max_practical: int | None = None,
 ) -> None:
     """
     Update one or more fields of an existing subject. Only fields passed
@@ -127,14 +113,13 @@ def update_subject(
     Args:
         subject_code: The subject to update.
         acting_user: The logged-in user performing this action.
-        name, semester, credits, max_internal, max_external, max_practical:
-            New values; leave as None to keep the existing value.
+        name, semester, credits: New values; leave as None to keep the
+            existing value.
 
     Raises:
         AuthorizationError: if acting_user's role is not Admin.
-        ValidationError: if a provided field fails validation, if the
-            resulting max_internal/external/practical combination would be
-            invalid, or if no fields at all were provided.
+        ValidationError: if a provided field fails validation, or if no
+            fields at all were provided.
         RecordNotFoundError: if subject_code does not exist.
     """
     auth.check_permission(acting_user["role"], (config.ROLE_ADMIN,))
@@ -163,35 +148,6 @@ def update_subject(
         set_clauses.append("credits = ?")
         params.append(credits)
         new_value["credits"] = credits
-
-    # max_internal/max_external/max_practical are validated TOGETHER, as a
-    # combination, even in a partial update -- e.g. if only max_internal
-    # is being changed, we still need to confirm the NEW max_internal
-    # together with the EXISTING max_external and max_practical still
-    # forms a valid subject (not all zero, none negative, none above the
-    # shared ceiling). "effective" below means "the value this field will
-    # have AFTER this update" -- the new value if provided, otherwise
-    # whatever it already was.
-    marks_config_changed = max_internal is not None or max_external is not None or max_practical is not None
-    if marks_config_changed:
-        effective_internal = max_internal if max_internal is not None else existing["max_internal"]
-        effective_external = max_external if max_external is not None else existing["max_external"]
-        effective_practical = max_practical if max_practical is not None else existing["max_practical"]
-
-        validate_max_marks_configuration(effective_internal, effective_external, effective_practical)
-
-        if max_internal is not None:
-            set_clauses.append("max_internal = ?")
-            params.append(max_internal)
-            new_value["max_internal"] = max_internal
-        if max_external is not None:
-            set_clauses.append("max_external = ?")
-            params.append(max_external)
-            new_value["max_external"] = max_external
-        if max_practical is not None:
-            set_clauses.append("max_practical = ?")
-            params.append(max_practical)
-            new_value["max_practical"] = max_practical
 
     if not set_clauses:
         raise ValidationError("No fields were provided to update.")
@@ -390,14 +346,6 @@ def _validate_bulk_subject_row(row: dict) -> None:
         raise ValidationError(f"Credits must be a whole number, got '{row.get('credits')}'.")
     validate_credits(credits)
 
-    try:
-        max_internal = int(row.get("max_internal", "") or 0)
-        max_external = int(row.get("max_external", "") or 0)
-        max_practical = int(row.get("max_practical", "") or 0)
-    except (TypeError, ValueError):
-        raise ValidationError("max_internal/max_external/max_practical must all be whole numbers.")
-    validate_max_marks_configuration(max_internal, max_external, max_practical)
-
     existing = fetch_one("SELECT subject_code FROM subjects WHERE subject_code = ?", (subject_code,))
     if existing is not None:
         raise DuplicateRecordError(f"A subject with code '{subject_code}' already exists.")
@@ -416,6 +364,11 @@ def render_subjects_page() -> None:
     is_admin = user["role"] == config.ROLE_ADMIN
 
     st.title("Subject Configuration")
+    st.caption(
+        f"Every subject uses the same fixed marks breakdown: Internal (max "
+        f"{config.MAX_INTERNAL_MARKS}) + External (max {config.MAX_EXTERNAL_MARKS}) + "
+        f"Practical (max {config.MAX_PRACTICAL_MARKS}) = {config.MAX_TOTAL_MARKS} total."
+    )
 
     if is_admin:
         with st.expander("Add New Subject"):
@@ -428,22 +381,12 @@ def render_subjects_page() -> None:
                 new_credits = st.number_input(
                     "Credits", min_value=config.MIN_CREDITS, max_value=config.MAX_CREDITS, step=1
                 )
-                new_max_internal = st.number_input(
-                    "Max Internal Marks", min_value=0, max_value=config.MAX_MARK_CEILING, value=20, step=1
-                )
-                new_max_external = st.number_input(
-                    "Max External Marks", min_value=0, max_value=config.MAX_MARK_CEILING, value=80, step=1
-                )
-                new_max_practical = st.number_input(
-                    "Max Practical Marks", min_value=0, max_value=config.MAX_MARK_CEILING, value=0, step=1
-                )
                 create_submitted = st.form_submit_button("Create Subject")
 
             if create_submitted:
                 try:
                     created_code = create_subject(
-                        new_code, new_name, int(new_semester), int(new_credits),
-                        int(new_max_internal), int(new_max_external), int(new_max_practical), user,
+                        new_code, new_name, int(new_semester), int(new_credits), user,
                     )
                     st.success(f"Subject '{created_code}' created.")
                     st.rerun()
@@ -453,16 +396,11 @@ def render_subjects_page() -> None:
         with st.expander("Bulk Import Subjects (CSV/Excel)"):
             render_bulk_import(
                 key_prefix="subjects_import",
-                required_columns=(
-                    "subject_code", "name", "semester", "credits",
-                    "max_internal", "max_external", "max_practical",
-                ),
+                required_columns=("subject_code", "name", "semester", "credits"),
                 key_columns=("subject_code",),
                 validate_row=_validate_bulk_subject_row,
                 commit_row=lambda row: create_subject(
-                    row["subject_code"], row["name"], int(row["semester"]), int(row["credits"]),
-                    int(row["max_internal"] or 0), int(row["max_external"] or 0), int(row["max_practical"] or 0),
-                    user,
+                    row["subject_code"], row["name"], int(row["semester"]), int(row["credits"]), user,
                 ),
             )
 
@@ -493,26 +431,13 @@ def render_subjects_page() -> None:
             "Credits", min_value=config.MIN_CREDITS, max_value=config.MAX_CREDITS,
             value=subject["credits"], step=1,
         )
-        edit_max_internal = st.number_input(
-            "Max Internal Marks", min_value=0, max_value=config.MAX_MARK_CEILING,
-            value=subject["max_internal"], step=1,
-        )
-        edit_max_external = st.number_input(
-            "Max External Marks", min_value=0, max_value=config.MAX_MARK_CEILING,
-            value=subject["max_external"], step=1,
-        )
-        edit_max_practical = st.number_input(
-            "Max Practical Marks", min_value=0, max_value=config.MAX_MARK_CEILING,
-            value=subject["max_practical"], step=1,
-        )
         update_submitted = st.form_submit_button("Save Changes")
 
     if update_submitted:
         try:
             update_subject(
                 code_choice, user, name=edit_name, semester=int(edit_semester),
-                credits=int(edit_credits), max_internal=int(edit_max_internal),
-                max_external=int(edit_max_external), max_practical=int(edit_max_practical),
+                credits=int(edit_credits),
             )
             st.success("Subject updated.")
             st.rerun()

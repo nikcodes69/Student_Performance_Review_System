@@ -41,7 +41,6 @@ from utils.validators import (
     validate_email,
     validate_exam_type,
     validate_mark_value,
-    validate_max_marks_configuration,
     validate_name,
     validate_password,
     validate_phone,
@@ -331,33 +330,6 @@ def test_validate_credits_rejects_too_high():
 
 
 # ---------------------------------------------------------------------------
-# validate_max_marks_configuration
-# ---------------------------------------------------------------------------
-
-def test_validate_max_marks_configuration_accepts_valid_split():
-    # Should not raise.
-    validate_max_marks_configuration(max_internal=20, max_external=80, max_practical=0)
-
-
-def test_validate_max_marks_configuration_rejects_negative_value():
-    with pytest.raises(ValidationError):
-        validate_max_marks_configuration(max_internal=-5, max_external=80, max_practical=0)
-
-
-def test_validate_max_marks_configuration_rejects_all_zero():
-    with pytest.raises(ValidationError):
-        validate_max_marks_configuration(max_internal=0, max_external=0, max_practical=0)
-
-
-def test_validate_max_marks_configuration_rejects_above_ceiling():
-    # 150 exceeds config.MAX_MARK_CEILING (100) -- no student could ever
-    # legally be given a matching mark, since marks.internal is itself
-    # capped at 100 by the database's own CHECK constraint.
-    with pytest.raises(ValidationError):
-        validate_max_marks_configuration(max_internal=150, max_external=80, max_practical=0)
-
-
-# ---------------------------------------------------------------------------
 # validate_exam_type
 # ---------------------------------------------------------------------------
 
@@ -374,8 +346,7 @@ def test_validate_exam_type_rejects_unknown_type():
 # validate_mark_value
 # ---------------------------------------------------------------------------
 
-def test_validate_mark_value_accepts_value_within_subject_maximum():
-    # Subject's max_internal is 20 for this example; 18 is within range.
+def test_validate_mark_value_accepts_value_within_maximum():
     assert validate_mark_value(18, max_allowed=20, component_name="internal") == 18
 
 
@@ -384,11 +355,7 @@ def test_validate_mark_value_rejects_negative_value():
         validate_mark_value(-1, max_allowed=20, component_name="internal")
 
 
-def test_validate_mark_value_rejects_value_above_subject_maximum():
-    # 25 exceeds this subject's own max_internal of 20, even though 25 is
-    # well within the database's generic 0-100 sanity ceiling -- this is
-    # exactly the per-subject precision the database CHECK constraint
-    # cannot express on its own.
+def test_validate_mark_value_rejects_value_above_maximum():
     with pytest.raises(ValidationError):
         validate_mark_value(25, max_allowed=20, component_name="internal")
 

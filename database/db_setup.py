@@ -233,12 +233,18 @@ def create_tables(conn) -> None:
         # reason as roll_no: it is institutionally assigned, stable, and
         # already the human-facing identifier.
         #
-        # max_internal / max_external / max_practical are per-subject
-        # ceilings (a lab-heavy subject might have max_practical=50 and
-        # max_external=0, for instance). The final CHECK below simply
-        # guards against a subject where ALL THREE are zero, which would
-        # mean the subject has no gradable component at all -- almost
-        # certainly a data-entry mistake.
+        # NO max_internal/max_external/max_practical COLUMNS HERE (unlike
+        # an earlier version of this schema): every subject now uses the
+        # EXACT SAME marks breakdown (config.MAX_INTERNAL_MARKS/
+        # MAX_EXTERNAL_MARKS/MAX_PRACTICAL_MARKS -- 25/50/25, 100 total),
+        # so a per-subject column would just repeat the identical value on
+        # every single row -- storing data that never actually varies is
+        # exactly what 3NF's "every non-key column must depend on the
+        # key" principle asks us to avoid (these three values do not
+        # depend on WHICH subject the row describes; they are the same
+        # for all of them). See migrate_schema() below for the one-time
+        # table-rebuild that removed these columns from a database
+        # created before this change.
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS subjects (
                 subject_code  TEXT PRIMARY KEY,
@@ -249,31 +255,26 @@ def create_tables(conn) -> None:
                 credits       INTEGER NOT NULL
                                   CHECK (credits BETWEEN {config.MIN_CREDITS}
                                                    AND {config.MAX_CREDITS}),
-                max_internal  INTEGER NOT NULL DEFAULT 0 CHECK (max_internal >= 0),
-                max_external  INTEGER NOT NULL DEFAULT 0 CHECK (max_external >= 0),
-                max_practical INTEGER NOT NULL DEFAULT 0 CHECK (max_practical >= 0),
                 is_active     INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
                 created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CHECK (max_internal + max_external + max_practical > 0)
+                updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
         # ---------------------------------------------------------------
         # marks
         # ---------------------------------------------------------------
-        # The upper bound used here (MAX_MARK_CEILING = 100) is a generous,
-        # STATIC sanity check -- it just stops absurd values like 9999 at
-        # the database level. The REAL per-subject ceiling (internal must
-        # not exceed THIS subject's max_internal) cannot be written as a
-        # simple CHECK constraint, because SQLite's CHECK constraints
-        # cannot reliably look up a value from a different table. That
-        # exact, dynamic rule is enforced instead by utils/validators.py
-        # BEFORE any INSERT/UPDATE reaches this table. This is a
-        # deliberate two-layer defence: validators.py enforces precise,
-        # per-subject business rules; the database CHECK constraints
-        # enforce broad, absolute sanity limits as a last line of defence
-        # even if a bug elsewhere skipped validation.
+        # Each component's own EXACT ceiling is now a fixed, global
+        # constant (config.MAX_INTERNAL_MARKS/MAX_EXTERNAL_MARKS/
+        # MAX_PRACTICAL_MARKS), not a per-subject lookup -- so, unlike an
+        # earlier version of this schema, the database CHECK constraint
+        # below can express the REAL rule directly (internal <= 25,
+        # external <= 50, practical <= 25), not just a generic 0-100
+        # sanity ceiling. utils/validators.py's validate_mark_value()
+        # still enforces the identical rule BEFORE an INSERT/UPDATE is
+        # even attempted, for a friendlier error message -- this CHECK
+        # constraint is the second, independent layer of the same
+        # two-layer defence used throughout this project.
         #
         # UNIQUE(roll_no, subject_code, semester, exam_type) stops the same
         # exam attempt from being entered twice for the same student and
@@ -286,11 +287,11 @@ def create_tables(conn) -> None:
                 roll_no      TEXT NOT NULL,
                 subject_code TEXT NOT NULL,
                 internal     INTEGER NOT NULL
-                                 CHECK (internal BETWEEN 0 AND {config.MAX_MARK_CEILING}),
+                                 CHECK (internal BETWEEN 0 AND {config.MAX_INTERNAL_MARKS}),
                 external     INTEGER NOT NULL
-                                 CHECK (external BETWEEN 0 AND {config.MAX_MARK_CEILING}),
+                                 CHECK (external BETWEEN 0 AND {config.MAX_EXTERNAL_MARKS}),
                 practical    INTEGER NOT NULL
-                                 CHECK (practical BETWEEN 0 AND {config.MAX_MARK_CEILING}),
+                                 CHECK (practical BETWEEN 0 AND {config.MAX_PRACTICAL_MARKS}),
                 semester     INTEGER NOT NULL
                                  CHECK (semester BETWEEN {config.MIN_SEMESTER}
                                                   AND {config.MAX_SEMESTER}),
@@ -624,12 +625,144 @@ def migrate_schema(conn) -> None:
         )
         conn.commit()
 
+        # subjects/marks predating the fixed 25/50/25 marks breakdown --
+        # see _rebuild_subjects_and_marks_tables() for why this needs a
+        # full table rebuild rather than a simple ALTER TABLE (dropping a
+        # column and tightening a CHECK constraint are both things
+        # neither SQLite nor libsql can do in place).
+        subjects_columns = {row[1] for row in cursor.execute("PRAGMA table_info(subjects)").fetchall()}
+        if "max_internal" in subjects_columns:
+            _rebuild_subjects_and_marks_tables(conn)
+            create_indexes(conn)  # marks' indexes were dropped along with the old table -- recreate them
+            logger.info("Migrated subjects/marks tables to the fixed 25/50/25 marks breakdown.")
+
     except (sqlite3.Error, ValueError) as error:
         # See create_tables()'s comment above for why ValueError is caught
         # here too -- this function touches the same two backends.
         conn.rollback()
         logger.error("Failed to migrate schema: %s", error)
         raise DatabaseError(f"Could not migrate database schema: {error}") from error
+
+
+def _rebuild_subjects_and_marks_tables(conn) -> None:
+    """
+    Rebuild subjects (dropping max_internal/max_external/max_practical)
+    and marks (tightening its CHECK constraints to the fixed per-
+    component ceilings) -- called by migrate_schema() above, only for a
+    database created before config.MAX_INTERNAL_MARKS/MAX_EXTERNAL_MARKS/
+    MAX_PRACTICAL_MARKS existed.
+
+    WHY A FULL REBUILD, NOT AN ALTER TABLE: SQLite (and libsql) cannot
+    drop a column that participates in a CHECK constraint, and cannot
+    modify an existing CHECK constraint's bounds at all -- both are
+    permanently baked into a table's original CREATE TABLE statement.
+    The only way to change either is SQLite's own documented procedure:
+    create a new table with the desired final shape, copy every row
+    across, drop the old table, then rename the new one into its place.
+    This is the same pattern already used for the "12-step ALTER TABLE"
+    style changes documented elsewhere in this project, applied here to
+    TWO tables together (subjects and marks) because marks.subject_code
+    foreign-keys to subjects.subject_code, and both changes shipped in
+    the same feature.
+
+    WHY FOREIGN KEYS ARE TURNED OFF FOR THE DURATION: with enforcement
+    on, dropping "subjects" out from under "marks" (even for the split
+    second before "subjects_new" is renamed into place) would be
+    rejected. Turned back on immediately afterward, followed by
+    `PRAGMA foreign_key_check` to positively confirm no orphaned or
+    mismatched row was introduced by the rebuild -- not just assuming it
+    worked because no exception was raised.
+
+    WHY marks' INSERT WOULD FAIL LOUDLY, NOT SILENTLY CLAMP, IF ANY
+    EXISTING ROW VIOLATED THE NEW TIGHTER RANGES: marks_new's CHECK
+    constraints are the real, final ones (internal<=25, external<=50,
+    practical<=25) -- copying a row that used to be legal under the old,
+    more permissive ceiling (up to 100 on each component) but violates
+    the new one raises a CHECK constraint error immediately, aborting
+    the whole migration rather than truncating or silently altering
+    anyone's real marks data. (Verified directly against this project's
+    real production data before ever running this migration for real --
+    every existing mark obtained was already comfortably within the new
+    ranges.)
+
+    Args:
+        conn: Whatever get_connection() returned.
+    """
+    cursor = conn.cursor()
+
+    # Must happen BEFORE the transaction below -- SQLite (and libsql)
+    # ignore an attempt to change this PRAGMA while a transaction is
+    # already open.
+    cursor.execute("PRAGMA foreign_keys = OFF")
+
+    # --- subjects: drop max_internal/max_external/max_practical ---
+    cursor.execute(f"""
+        CREATE TABLE subjects_new (
+            subject_code  TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            semester      INTEGER NOT NULL
+                              CHECK (semester BETWEEN {config.MIN_SEMESTER}
+                                               AND {config.MAX_SEMESTER}),
+            credits       INTEGER NOT NULL
+                              CHECK (credits BETWEEN {config.MIN_CREDITS}
+                                               AND {config.MAX_CREDITS}),
+            is_active     INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+            created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        INSERT INTO subjects_new
+            (subject_code, name, semester, credits, is_active, created_at, updated_at)
+        SELECT subject_code, name, semester, credits, is_active, created_at, updated_at
+        FROM subjects
+    """)
+    cursor.execute("DROP TABLE subjects")
+    cursor.execute("ALTER TABLE subjects_new RENAME TO subjects")
+
+    # --- marks: tighten CHECK constraints to the fixed per-component ceilings ---
+    cursor.execute(f"""
+        CREATE TABLE marks_new (
+            mark_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            roll_no      TEXT NOT NULL,
+            subject_code TEXT NOT NULL,
+            internal     INTEGER NOT NULL
+                             CHECK (internal BETWEEN 0 AND {config.MAX_INTERNAL_MARKS}),
+            external     INTEGER NOT NULL
+                             CHECK (external BETWEEN 0 AND {config.MAX_EXTERNAL_MARKS}),
+            practical    INTEGER NOT NULL
+                             CHECK (practical BETWEEN 0 AND {config.MAX_PRACTICAL_MARKS}),
+            semester     INTEGER NOT NULL
+                             CHECK (semester BETWEEN {config.MIN_SEMESTER}
+                                              AND {config.MAX_SEMESTER}),
+            exam_type    TEXT NOT NULL
+                             CHECK (exam_type IN ({_quoted_list(config.EXAM_TYPES)})),
+            created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (roll_no) REFERENCES students (roll_no),
+            FOREIGN KEY (subject_code) REFERENCES subjects (subject_code),
+            UNIQUE (roll_no, subject_code, semester, exam_type)
+        )
+    """)
+    cursor.execute("""
+        INSERT INTO marks_new
+            (mark_id, roll_no, subject_code, internal, external, practical,
+             semester, exam_type, created_at, updated_at)
+        SELECT mark_id, roll_no, subject_code, internal, external, practical,
+               semester, exam_type, created_at, updated_at
+        FROM marks
+    """)
+    cursor.execute("DROP TABLE marks")
+    cursor.execute("ALTER TABLE marks_new RENAME TO marks")
+
+    conn.commit()
+    cursor.execute("PRAGMA foreign_keys = ON")
+
+    fk_violations = cursor.execute("PRAGMA foreign_key_check").fetchall()
+    if fk_violations:
+        raise DatabaseError(
+            f"Foreign key violations detected after rebuilding subjects/marks: {fk_violations}"
+        )
 
 
 def initialize_database() -> None:

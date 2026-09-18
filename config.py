@@ -200,14 +200,21 @@ MAX_GRADE_POINT = max(grade_point for _, _, grade_point in GRADE_SCALE)
 # ---------------------------------------------------------------------------
 # 8. MARKS & RECORD-KEEPING RULES (used by database/db_setup.py, validators.py)
 # ---------------------------------------------------------------------------
-# A generous, static sanity ceiling for any single mark component (internal,
-# external, or practical). This is NOT the real per-subject maximum -- that
-# comes from subjects.max_internal / max_external / max_practical, which can
-# differ per subject and is validated dynamically in utils/validators.py
-# against the database. This constant only stops obviously absurd values
-# (e.g. entering 9999) at the database's CHECK-constraint level, as a second
-# line of defence below the validation layer.
-MAX_MARK_CEILING = 100
+# Every subject uses the EXACT SAME marks breakdown -- there is no longer a
+# per-subject configurable maximum (subjects.max_internal/max_external/
+# max_practical were removed; see database/db_setup.py's migrate_schema()
+# for the one-time table-rebuild migration that dropped those columns).
+# These three constants are the SOLE source of truth for every mark
+# ceiling in the whole application -- the marks table's own CHECK
+# constraints, utils/validators.py's validate_mark_value() calls, every
+# percentage calculation (modules/grades.py, modules/analytics.py,
+# modules/ml_predictions.py), and the marks-entry UI (modules/marks.py)
+# all read from here, so changing a maximum in the future means changing
+# it in exactly ONE place.
+MAX_INTERNAL_MARKS = 25
+MAX_EXTERNAL_MARKS = 50
+MAX_PRACTICAL_MARKS = 25
+MAX_TOTAL_MARKS = MAX_INTERNAL_MARKS + MAX_EXTERNAL_MARKS + MAX_PRACTICAL_MARKS  # 100
 
 # The kinds of exam attempt a marks row can represent. 'backlog' and
 # 'improvement' let a student have more than one marks row for the same

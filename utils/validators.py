@@ -8,7 +8,7 @@ raises utils.exceptions.ValidationError with a human-readable message
 
 WHY THIS LAYER EXISTS, GIVEN THE DATABASE ALREADY HAS CHECK CONSTRAINTS:
 database/db_setup.py already enforces things like "semester must be
-between 1 and 8" at the database level. So why check it again here? Three
+between 1 and 8" at the database level. So why check it again here? Two
 reasons:
 
   1. FRIENDLY ERRORS. If bad data reaches the database, SQLite raises a
@@ -16,15 +16,16 @@ reasons:
      BETWEEN 1 AND 8". That is not something we want to show a Teacher
      typing into a Streamlit form. Catching the problem here first lets us
      raise ValidationError("Semester must be between 1 and 8.") instead --
-     a message meant for a human.
-  2. PRECISION THE DATABASE CANNOT EXPRESS. The real ceiling for a mark
-     ("internal must not exceed THIS subject's max_internal") depends on
-     looking up a value in a different table (subjects). SQLite's CHECK
-     constraints cannot do that reliably. This file CAN, because it runs
-     in Python and can query the database first. See validate_mark_value()
-     below -- this is the function referenced in database/db_setup.py's
-     comment on the marks table.
-  3. FAIL BEFORE SPENDING A DATABASE CALL. Rejecting bad input in Python,
+     a message meant for a human. See validate_mark_value() below for the
+     same reasoning applied to marks: every subject uses the exact same
+     fixed marks breakdown (config.MAX_INTERNAL_MARKS/MAX_EXTERNAL_MARKS/
+     MAX_PRACTICAL_MARKS -- see config.py), so the database's own CHECK
+     constraints on the marks table now express the EXACT real rule
+     directly (they no longer need a second, more precise layer above
+     them the way an earlier, per-subject-configurable version of this
+     schema did) -- this file still checks it first purely for the
+     friendlier message.
+  2. FAIL BEFORE SPENDING A DATABASE CALL. Rejecting bad input in Python,
      before opening a transaction, is cheaper and keeps invalid data from
      ever touching the database in the first place -- "defense in depth":
      two independent layers (this file, and the database's own CHECK
@@ -457,53 +458,6 @@ def validate_subject_name(name: str) -> str:
     return name
 
 
-def validate_max_marks_configuration(
-    max_internal: int, max_external: int, max_practical: int
-) -> None:
-    """
-    Validate the maximum-marks configuration for a subject.
-
-    Mirrors the subjects table's CHECK constraints (none negative, not
-    all three zero at once -- a subject needs at least one gradable
-    component), PLUS one more rule the database itself cannot express:
-    none of the three may exceed config.MAX_MARK_CEILING. That ceiling is
-    also the upper bound the marks table's own CHECK constraints enforce
-    on marks.internal/external/practical (see database/db_setup.py) -- so
-    if a subject's max_internal were allowed to be, say, 150, no student
-    could ever actually be given a matching mark, because the database
-    would reject any internal mark above 100 regardless of what this
-    subject claims its maximum is. Keeping both bounds equal here prevents
-    that silent inconsistency.
-
-    Args:
-        max_internal: Maximum internal marks for the subject.
-        max_external: Maximum external (theory exam) marks for the subject.
-        max_practical: Maximum practical marks for the subject.
-
-    Raises:
-        ValidationError: if any value is negative, exceeds
-            config.MAX_MARK_CEILING, or all three are zero.
-    """
-    for label, value in (
-        ("max_internal", max_internal),
-        ("max_external", max_external),
-        ("max_practical", max_practical),
-    ):
-        if value < 0:
-            raise ValidationError(f"{label} cannot be negative.")
-        if value > config.MAX_MARK_CEILING:
-            raise ValidationError(
-                f"{label} cannot exceed {config.MAX_MARK_CEILING} "
-                "(the maximum any single mark component can ever be)."
-            )
-
-    if max_internal + max_external + max_practical <= 0:
-        raise ValidationError(
-            "A subject must have at least one gradable component "
-            "(max_internal, max_external, or max_practical greater than zero)."
-        )
-
-
 # ---------------------------------------------------------------------------
 # MARKS FIELDS (used by modules/marks.py)
 # ---------------------------------------------------------------------------
@@ -530,21 +484,26 @@ def validate_exam_type(exam_type: str) -> str:
 
 def validate_mark_value(value: int, max_allowed: int, component_name: str) -> int:
     """
-    Validate ONE mark component (internal, external, or practical) against
-    the ACTUAL maximum for the specific subject it belongs to.
+    Validate ONE mark component (internal, external, or practical)
+    against its ceiling.
 
-    This is the precise, per-subject check that database/db_setup.py's
-    comment on the marks table refers to: the database itself can only
-    enforce a generic 0-100 sanity ceiling (config.MAX_MARK_CEILING),
-    because a CHECK constraint cannot look up another table's value. This
-    function CAN, because the caller (modules/marks.py) first looks up the
-    subject's real max_internal/max_external/max_practical from the
-    subjects table and passes it in as max_allowed.
+    STILL TAKES max_allowed AS A PARAMETER, RATHER THAN READING
+    config.MAX_INTERNAL_MARKS/etc. DIRECTLY: every subject now uses the
+    exact same fixed marks breakdown (see config.py), so in practice the
+    caller (modules/marks.py) always passes one of those three constants
+    -- but keeping this function generic, rather than hard-coding which
+    constant applies to which component, means it stays exactly as
+    reusable and exactly as easy to unit-test with plain numbers as it
+    already was (see tests/test_validators.py) -- the same reasoning
+    modules/grades.py's calculate_percentage() already documents for
+    taking its own maximums as parameters instead of importing config
+    directly.
 
     Args:
         value: The mark obtained.
-        max_allowed: The maximum possible mark for this component, as
-            configured for this specific subject (e.g. subjects.max_internal).
+        max_allowed: The maximum possible mark for this component (one
+            of config.MAX_INTERNAL_MARKS/MAX_EXTERNAL_MARKS/
+            MAX_PRACTICAL_MARKS, passed in by the caller).
         component_name: Which component this is ("internal", "external",
             or "practical"), used in the error message.
 
@@ -559,8 +518,8 @@ def validate_mark_value(value: int, max_allowed: int, component_name: str) -> in
 
     if value > max_allowed:
         raise ValidationError(
-            f"{component_name.capitalize()} marks ({value}) cannot exceed "
-            f"the maximum for this subject ({max_allowed})."
+            f"{component_name.capitalize()} marks ({value}) cannot exceed the maximum "
+            f"of {max_allowed}."
         )
 
     return value

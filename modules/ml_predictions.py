@@ -207,21 +207,12 @@ def _compute_live_features(roll_no: str, semester: int) -> dict | None:
     # Average percentage per ASSESSMENT COMPONENT (internal/external/
     # practical), across every subject this semester -- matching
     # ml/generate_data.py's aggregate internal_pct/external_pct/
-    # practical_pct exactly. A subject with max_internal == 0 (no internal
-    # component at all) is excluded from that component's average rather
-    # than causing a division by zero.
-    internal_components = [
-        row["internal"] / row["max_internal"] * 100
-        for row in semester_marks if row["max_internal"] > 0
-    ]
-    external_components = [
-        row["external"] / row["max_external"] * 100
-        for row in semester_marks if row["max_external"] > 0
-    ]
-    practical_components = [
-        row["practical"] / row["max_practical"] * 100
-        for row in semester_marks if row["max_practical"] > 0
-    ]
+    # practical_pct exactly. The maximums are fixed system-wide constants
+    # (config.MAX_INTERNAL_MARKS etc.), never zero, so no zero-division
+    # guard is needed here.
+    internal_components = [row["internal"] / config.MAX_INTERNAL_MARKS * 100 for row in semester_marks]
+    external_components = [row["external"] / config.MAX_EXTERNAL_MARKS * 100 for row in semester_marks]
+    practical_components = [row["practical"] / config.MAX_PRACTICAL_MARKS * 100 for row in semester_marks]
 
     internal_pct = float(np.mean(internal_components)) if internal_components else 0.0
     external_pct = float(np.mean(external_components)) if external_components else 0.0

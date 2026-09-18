@@ -79,9 +79,8 @@ def _seed_three_students_one_subject() -> None:
     (rounded to config.ROUND_DECIMALS = 2).
     """
     execute_write(
-        "INSERT INTO subjects (subject_code, name, semester, credits, max_internal, max_external, max_practical) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("SUB1", "Fixture Subject", 1, 3, 20, 80, 0),
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        ("SUB1", "Fixture Subject", 1, 3),
     )
     for roll_no, name in (("S1", "Alice"), ("S2", "Bob"), ("S3", "Carol")):
         execute_write(
@@ -90,14 +89,15 @@ def _seed_three_students_one_subject() -> None:
             (roll_no, name, 1, "BCA", f"{roll_no.lower()}@example.com", "9812345678", 2024),
         )
 
-    # internal/external chosen so (internal + external) * 100 / 100 gives
-    # exactly the target percentage from the table above.
-    marks_by_roll = {"S1": (18, 72), "S2": (10, 40), "S3": (15, 60)}
-    for roll_no, (internal, external) in marks_by_roll.items():
+    # internal/external/practical chosen so their sum out of the fixed
+    # 100-mark total gives exactly the target percentage from the table
+    # above, while staying within each component's own ceiling (25/50/25).
+    marks_by_roll = {"S1": (25, 50, 15), "S2": (25, 25, 0), "S3": (25, 50, 0)}
+    for roll_no, (internal, external, practical) in marks_by_roll.items():
         execute_write(
             "INSERT INTO marks (roll_no, subject_code, internal, external, practical, semester, exam_type) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (roll_no, "SUB1", internal, external, 0, 1, "regular"),
+            (roll_no, "SUB1", internal, external, practical, 1, "regular"),
         )
 
     attendance_by_roll = {"S1": (20, 18), "S2": (20, 10), "S3": (20, 14)}
@@ -133,9 +133,8 @@ def test_class_rankings_ties_share_a_rank_and_skip_the_next_one(test_db):
     # distinct student must get rank 3 (not rank 2) -- "competition
     # ranking", see get_class_rankings()'s docstring.
     execute_write(
-        "INSERT INTO subjects (subject_code, name, semester, credits, max_internal, max_external, max_practical) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        ("SUB1", "Fixture Subject", 1, 3, 20, 80, 0),
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        ("SUB1", "Fixture Subject", 1, 3),
     )
     for roll_no, name in (("S1", "Alice"), ("S2", "Bob"), ("S3", "Carol")):
         execute_write(
@@ -143,12 +142,15 @@ def test_class_rankings_ties_share_a_rank_and_skip_the_next_one(test_db):
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (roll_no, name, 1, "BCA", f"{roll_no.lower()}@example.com", "9812345678", 2024),
         )
-    # S1 and S2 both score exactly 90%; S3 scores 50%.
-    for roll_no, (internal, external) in {"S1": (18, 72), "S2": (18, 72), "S3": (10, 40)}.items():
+    # S1 and S2 both score exactly 90%; S3 scores 50%. (25 + 50 + 15 = 90,
+    # 25 + 25 + 0 = 50 -- within each component's own ceiling of 25/50/25.)
+    for roll_no, (internal, external, practical) in {
+        "S1": (25, 50, 15), "S2": (25, 50, 15), "S3": (25, 25, 0),
+    }.items():
         execute_write(
             "INSERT INTO marks (roll_no, subject_code, internal, external, practical, semester, exam_type) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (roll_no, "SUB1", internal, external, 0, 1, "regular"),
+            (roll_no, "SUB1", internal, external, practical, 1, "regular"),
         )
 
     rankings = analytics.get_class_rankings()
