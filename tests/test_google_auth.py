@@ -74,7 +74,10 @@ def _admin_user() -> dict:
 # authenticate_with_google() -- Student auto-registration
 # ---------------------------------------------------------------------------
 
-def test_authenticate_with_google_rejects_unknown_email(test_db):
+def test_authenticate_with_google_rejects_unknown_email_without_a_role(test_db):
+    # No expected_role given at all (e.g. a stale identity cookie from
+    # before role-scoped login pages existed) -- nothing to register a
+    # brand-new account as, so this must still fail, not silently pick a role.
     with pytest.raises(AuthenticationError):
         auth.authenticate_with_google("nobody@gmail.com")
 
@@ -84,7 +87,7 @@ def test_authenticate_with_google_auto_registers_matching_active_student(test_db
     from modules import students
     students.create_student("BCA0S1", "Alice", 1, "BCA", "alice@gmail.com", "9812345678", 2024, admin_user)
 
-    user = auth.authenticate_with_google("alice@gmail.com")
+    user = auth.authenticate_with_google("alice@gmail.com", expected_role=config.ROLE_STUDENT)
 
     assert user["username"] == "BCA0S1"
     assert user["role"] == config.ROLE_STUDENT
@@ -99,7 +102,7 @@ def test_authenticate_with_google_auto_registers_short_roll_no(test_db):
     from modules import students
     students.create_student("1", "Nikhil Thapa", 1, "BCA", "nikhil@gmail.com", "9818182402", 2026, admin_user)
 
-    user = auth.authenticate_with_google("nikhil@gmail.com")
+    user = auth.authenticate_with_google("nikhil@gmail.com", expected_role=config.ROLE_STUDENT)
     assert user["username"] == "1"
 
 
@@ -110,7 +113,7 @@ def test_authenticate_with_google_rejects_inactive_student(test_db):
     students.deactivate_student("BCA0S2", admin_user)
 
     with pytest.raises(AuthenticationError):
-        auth.authenticate_with_google("bob@gmail.com")
+        auth.authenticate_with_google("bob@gmail.com", expected_role=config.ROLE_STUDENT)
 
 
 def test_authenticate_with_google_is_idempotent_on_repeated_sign_in(test_db):
@@ -118,8 +121,8 @@ def test_authenticate_with_google_is_idempotent_on_repeated_sign_in(test_db):
     from modules import students
     students.create_student("BCA0S1", "Alice", 1, "BCA", "alice@gmail.com", "9812345678", 2024, admin_user)
 
-    first = auth.authenticate_with_google("alice@gmail.com")
-    second = auth.authenticate_with_google("alice@gmail.com")
+    first = auth.authenticate_with_google("alice@gmail.com", expected_role=config.ROLE_STUDENT)
+    second = auth.authenticate_with_google("alice@gmail.com", expected_role=config.ROLE_STUDENT)
 
     assert first["user_id"] == second["user_id"]  # same account, not a duplicate
 
@@ -131,7 +134,7 @@ def test_authenticate_with_google_rejects_when_unlinked_login_already_exists(tes
     auth.create_user("BCA0S3", "SomePass1!", config.ROLE_STUDENT, force_password_change=False)
 
     with pytest.raises(AuthenticationError):
-        auth.authenticate_with_google("carol@gmail.com")
+        auth.authenticate_with_google("carol@gmail.com", expected_role=config.ROLE_STUDENT)
 
 
 # ---------------------------------------------------------------------------
@@ -213,18 +216,21 @@ def test_authenticate_with_google_rejects_linked_account_of_a_different_role(tes
         auth.authenticate_with_google("teacher1@gmail.com", expected_role=config.ROLE_STUDENT)
 
 
-def test_authenticate_with_google_rejects_student_match_from_a_different_portal(test_db):
+def test_authenticate_with_google_self_registers_admin_ignoring_unrelated_student_record(test_db):
     # A Google email matching an active student's own email, but clicked
-    # from the Admin login page -- must not auto-register/sign in as a
-    # Student anyway.
+    # from the Admin login page -- self-registers a brand-new Admin
+    # account instead, per the open self-registration design (the role
+    # picked on the login page wins; the pre-existing student record for
+    # this same email is unrelated and left untouched).
     admin_user = _admin_user()
     from modules import students
     students.create_student("BCA0S1", "Alice", 1, "BCA", "alice@gmail.com", "9812345678", 2024, admin_user)
 
-    with pytest.raises(AuthenticationError):
-        auth.authenticate_with_google("alice@gmail.com", expected_role=config.ROLE_ADMIN)
+    user = auth.authenticate_with_google("alice@gmail.com", expected_role=config.ROLE_ADMIN)
 
-    # And no account was created as a side effect of the rejected attempt.
+    assert user["role"] == config.ROLE_ADMIN
+    assert user["username"] != "BCA0S1"  # a fresh username, not the student's roll_no
+    # The student record's own roll_no login is untouched by this.
     assert auth.fetch_one("SELECT user_id FROM users WHERE username = 'BCA0S1'") is None
 
 
@@ -246,6 +252,49 @@ def test_authenticate_with_google_without_expected_role_ignores_role(test_db):
 
     user = auth.authenticate_with_google("teacher1@gmail.com")
     assert user["user_id"] == teacher_id
+
+
+# ---------------------------------------------------------------------------
+# authenticate_with_google() -- open self-registration for Admin/Teacher,
+# see module docstring's "GOOGLE SIGN-IN" section for the explicit
+# trade-off this accepts (no pre-approval needed for any role, by request)
+# ---------------------------------------------------------------------------
+
+def test_authenticate_with_google_self_registers_brand_new_admin(test_db):
+    # No pre-existing admin invite, no pre-existing account of any kind --
+    # signing in from the Admin login page creates one on the spot.
+    user = auth.authenticate_with_google("newadmin@gmail.com", expected_role=config.ROLE_ADMIN)
+
+    assert user["role"] == config.ROLE_ADMIN
+    assert user["must_change_password"] is False
+    row = auth.fetch_one("SELECT google_email FROM users WHERE user_id = ?", (user["user_id"],))
+    assert row["google_email"] == "newadmin@gmail.com"
+
+
+def test_authenticate_with_google_self_registers_brand_new_teacher(test_db):
+    user = auth.authenticate_with_google("newteacher@gmail.com", expected_role=config.ROLE_TEACHER)
+    assert user["role"] == config.ROLE_TEACHER
+
+
+def test_authenticate_with_google_self_registration_username_avoids_collision(test_db):
+    # Two different Gmail addresses that happen to share a local part
+    # (different domains) must not collide on the same username.
+    auth.create_user("samuel", "SomePass1!", config.ROLE_TEACHER)  # occupies "samuel" already
+
+    user = auth.authenticate_with_google("samuel@gmail.com", expected_role=config.ROLE_ADMIN)
+
+    assert user["username"] != "samuel"  # the pre-existing "samuel" account is untouched
+    assert user["role"] == config.ROLE_ADMIN
+
+
+def test_authenticate_with_google_second_self_registration_attempt_respects_first_role(test_db):
+    # Once self-registered as Teacher, the SAME email trying to sign in
+    # again from the Admin page must be rejected, not re-registered or
+    # silently switched to Admin.
+    auth.authenticate_with_google("person@gmail.com", expected_role=config.ROLE_TEACHER)
+
+    with pytest.raises(AuthenticationError):
+        auth.authenticate_with_google("person@gmail.com", expected_role=config.ROLE_ADMIN)
 
 
 # ---------------------------------------------------------------------------

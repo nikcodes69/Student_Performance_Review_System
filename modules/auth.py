@@ -55,32 +55,45 @@ signup path below still requires proof tied back to something an Admin
     an additional path, not a replacement for that one.
 
 ======================================================================
-GOOGLE SIGN-IN -- THE SAME ASYMMETRIC RULE, VIA A DIFFERENT PROOF OF IDENTITY
+GOOGLE SIGN-IN -- A DELIBERATELY MORE PERMISSIVE RULE, BY EXPLICIT REQUEST
 ======================================================================
 authenticate_with_google() (below) is the Google-authenticated counterpart
-to authenticate()/self_register_student(), and follows the EXACT SAME
-trust rule, just with Google's own identity verification standing in for
-a typed password:
+to authenticate()/self_register_student(). Earlier versions of this
+function followed the EXACT SAME pre-approval rule as the section above
+(Teacher/Admin could never be auto-created, only Student could, via a
+matching on-file email). That was DELIBERATELY CHANGED, on explicit
+request, to this instead:
 
-  - STUDENT: a Google-verified email that matches an ACTIVE student
-    record's own email (the same match self_register_student() already
-    requires) gets a login auto-created on the spot, the first time they
-    sign in with that Google account -- no password to choose at all,
-    since Google already proved who they are.
+  - Every role -- Student, Teacher, AND Admin -- self-registers a brand
+    new account the first time someone signs in with a Google account
+    that isn't linked to anything yet, using whichever role's login page
+    (Admin/Teacher/Student) they picked before clicking "Sign in with
+    Google". No Admin pre-approval, no invite, no matching student
+    record required for Teacher/Admin (Student still prefers matching an
+    existing roll_no's on-file email when one exists, for a sensible
+    username, but falls back to the same open self-registration if not).
 
-  - TEACHER and ADMIN: NEVER auto-created via Google directly -- unlike a
-    Student's roll_no, there is no well-defined username to derive from
-    an arbitrary email address, so Google Sign-In alone is not enough to
-    create one of these accounts. A pre-approved Teacher/Admin instead
-    signs up once via signup_invited_account() (choosing their own
-    username there), and can then link their Google account to it
-    afterwards -- either themselves, via self_link_google_account() (any
-    logged-in user can link their OWN account, no Admin needed), or by
-    an Admin, via link_google_account() (render_user_management_page()).
-    Either way, Google Sign-In only ever reaches an account that already
-    exists; it can never be the FIRST step for a Teacher or Admin.
+  - THE TRADE-OFF, STATED PLAINLY: this means anyone who can reach this
+    app's login page and control a Google account can grant themselves
+    an Admin account, with full access to every student's records and
+    the audit log -- there is no gate left to stop them. This is the
+    OPPOSITE of the WHO CAN CREATE AN ACCOUNT section above, which exists
+    specifically to prevent exactly that. Both cannot be true at once;
+    this project accepted that trade-off for Google Sign-In specifically,
+    in exchange for zero-setup onboarding, while keeping the invite/
+    manual-creation paths above as the stricter alternative for
+    username/password accounts. If this app is ever deployed somewhere
+    the login page is reachable by people who should NOT be able to
+    self-grant Admin, this trade-off needs revisiting first.
+
+  - Once an account exists (via self-registration or any other path),
+    its role is fixed: a later Google Sign-In with the SAME email is
+    rejected, not re-created, if attempted from a DIFFERENT role's login
+    page than the one it was first registered under (see
+    authenticate_with_google()'s expected_role parameter).
 """
 
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -623,23 +636,61 @@ def authenticate(username: str, password: str, expected_role: str | None = None)
     }
 
 
+def _generate_username_from_google_email(google_email: str) -> str:
+    """
+    Build a fresh, available, valid username from a Google email address,
+    for self-registering a brand-new Admin/Teacher account that has no
+    pre-existing record to take a username from (unlike a Student's own
+    roll_no -- see authenticate_with_google()'s Student branch, which
+    prefers that instead of this whenever a matching roll_no exists).
+
+    Takes the email's local part (before '@'), replaces every character
+    validate_username() would reject with '_', pads it out to
+    config.USERNAME_MIN_LENGTH with trailing zeros if it's too short (a
+    local part can legally be a single character), and appends an
+    incrementing numeric suffix if that username is already taken -- so
+    two different people whose emails happen to share a local part (e.g.
+    two different "admin" addresses at different providers) still each
+    get their own distinct username instead of colliding.
+    """
+    local_part = google_email.split("@", 1)[0]
+    base = re.sub(r"[^A-Za-z0-9_]", "_", local_part)[: config.USERNAME_MAX_LENGTH]
+    if len(base) < config.USERNAME_MIN_LENGTH:
+        base = base.ljust(config.USERNAME_MIN_LENGTH, "0")
+
+    candidate = base
+    suffix = 1
+    while fetch_one("SELECT user_id FROM users WHERE username = ?", (candidate,)) is not None:
+        suffix += 1
+        candidate = f"{base}{suffix}"[: config.USERNAME_MAX_LENGTH]
+
+    return candidate
+
+
 def authenticate_with_google(google_email: str, expected_role: str | None = None) -> dict:
     """
     The Google-authenticated counterpart to authenticate() -- see this
     module's docstring's "GOOGLE SIGN-IN" section for the full trust
-    model this follows. Called from try_google_login() below, once
-    Streamlit's own OAuth round-trip (st.login("google")) has already
-    confirmed google_email is a real, provider-verified identity -- this
-    function never itself talks to Google or checks a password; its job
-    is entirely "map this already-verified email to an app account".
+    model this follows (deliberately open self-registration for every
+    role, not pre-approval-gated like the username/password paths).
+    Called from try_google_login() below, once Streamlit's own OAuth
+    round-trip (st.login("google")) has already confirmed google_email is
+    a real, provider-verified identity -- this function never itself
+    talks to Google or checks a password; its job is "map this already-
+    verified email to an app account, creating one if none exists yet".
 
     Args:
         google_email: The verified email address from st.user.email.
-        expected_role: If given, the ONLY role this Google sign-in is
-            allowed to succeed as -- set when the "Sign in with Google"
-            button was clicked from a specific role's login page (see
-            prepare_google_login()). None means "any role", the
-            behaviour before role-scoped login pages existed.
+        expected_role: If given, the role this Google sign-in is FOR --
+            set when the "Sign in with Google" button was clicked from a
+            specific role's login page (see prepare_google_login()). Used
+            both to reject a mismatch against an EXISTING account's real
+            role, and as the role assigned to a brand-new self-registered
+            account. None means "no role context available" (e.g. a
+            stale identity cookie from before role-scoped login pages
+            existed) -- an existing account is still reached by email
+            alone, but a brand-new account cannot be created without
+            knowing which role to give it.
 
     Returns:
         A dict with keys "user_id", "username", "role",
@@ -648,12 +699,12 @@ def authenticate_with_google(google_email: str, expected_role: str | None = None
         the way login() already does for a password login.
 
     Raises:
-        AuthenticationError: if google_email matches neither an already-
-            linked account nor an active student record's own email, if
-            it matches a student but a login already exists for that
-            roll_no under a DIFFERENT (unlinked) account, if the matched
-            account has been deactivated, or if expected_role is given
-            and the matched (or matchable) account's role doesn't equal it.
+        AuthenticationError: if the matched account has been deactivated,
+            if expected_role is given and an existing account's role
+            doesn't equal it, if expected_role is given and matches a
+            Student roll_no whose login already exists under a DIFFERENT
+            (unlinked) account, or if no account exists yet and
+            expected_role is None (nothing to register the new account as).
 
     WHY A SPECIFIC "wrong portal" MESSAGE IS SAFE HERE, UNLIKE
     authenticate()'s DELIBERATELY GENERIC "invalid credentials": that
@@ -680,69 +731,71 @@ def authenticate_with_google(google_email: str, expected_role: str | None = None
         )
 
     if existing is None:
-        # No account linked to this Google email yet -- see if an ACTIVE
-        # student's own email matches, the same trust rule
-        # self_register_student() already uses for a typed-password signup.
-        student_row = fetch_one(
-            "SELECT roll_no FROM students WHERE email = ? AND is_active = 1", (google_email,),
-        )
-        if student_row is None:
-            invite = fetch_one("SELECT role FROM pending_accounts WHERE email = ?", (google_email,))
-            if invite is not None:
-                raise AuthenticationError(
-                    f"You have a pending invite as {invite['role']}, but Google Sign-In can't "
-                    "create that account automatically -- use the \"Sign Up (Invited)\" tab to "
-                    "choose a username and password first, then you can link your Google account "
-                    "from the Change Password page."
-                )
-            if expected_role is None:
-                raise AuthenticationError(
-                    "No account is linked to this Google email. Students: make sure this is "
-                    "the email address on file for your roll number, or contact an administrator. "
-                    "Teachers/Admins: ask an administrator to invite you, or to link your Google account."
-                )
-            if expected_role == config.ROLE_STUDENT:
-                raise AuthenticationError(
-                    "No Student account is linked to this Google email. Make sure this is the "
-                    "email address on file for your roll number, or contact an administrator."
-                )
+        if expected_role is None:
             raise AuthenticationError(
-                f"No {expected_role.capitalize()} account is linked to this Google email. "
-                "Ask an administrator to invite you, or to link your Google account."
+                "No account is linked to this Google email. Please sign in from one of the "
+                "role-specific login pages (Admin, Teacher, or Student) so a new account can "
+                "be created for you automatically."
             )
 
-        # A student RECORD matches, but expected_role points at a
-        # different portal (e.g. this button was clicked on the
-        # Admin/Teacher login page) -- refuse rather than silently
-        # auto-registering and signing them in as a Student anyway, which
-        # would be confusing ("I clicked Admin login and it let me in?").
-        if expected_role is not None and expected_role != config.ROLE_STUDENT:
-            raise AuthenticationError(
-                f"This Google email matches a Student record, not {expected_role.capitalize()}. "
-                "Use the Student login page instead."
+        # A Student signing in from the Student page whose email matches
+        # a student record inherits that record's own roll_no as their
+        # username (the same match self_register_student() already
+        # requires for a typed-password signup) -- a more meaningful
+        # username than one minted from the email, when one is available.
+        # Checked regardless of is_active, unlike the match itself further
+        # down: a DEACTIVATED student's email should reject clearly with
+        # "this student is deactivated", not fall through and get treated
+        # as a total stranger who happens to self-register a brand-new,
+        # unrelated account under the same email.
+        student_row = None
+        if expected_role == config.ROLE_STUDENT:
+            student_row = fetch_one(
+                "SELECT roll_no, is_active FROM students WHERE email = ?", (google_email,),
+            )
+            if student_row is not None and not student_row["is_active"]:
+                raise AuthenticationError(
+                    "This email is on file for a deactivated student record. Contact an administrator."
+                )
+
+        if student_row is not None:
+            roll_no = student_row["roll_no"]
+            already_has_login = fetch_one("SELECT user_id FROM users WHERE username = ?", (roll_no,))
+            if already_has_login is not None:
+                raise AuthenticationError(
+                    f"A login already exists for roll number '{roll_no}', but it is not linked "
+                    "to this Google email yet. Log in with your username and password instead, "
+                    "then link your Google account from the Change Password page."
+                )
+
+            # _insert_user_row(), not create_user(): roll_no came straight
+            # from our own students table, already validated (and
+            # normalised) when that record was created -- see
+            # _insert_user_row()'s docstring for why running it through
+            # create_user()'s OWN validate_username() on top of that would
+            # be wrong, not just redundant, for a short roll number (e.g.
+            # this project's real data: roll_no "1" and "2").
+            user_id = _insert_user_row(
+                username=roll_no, password=_random_unusable_password(), role=config.ROLE_STUDENT,
+                force_password_change=False, google_email=google_email,
+            )
+            logger.info("Student '%s' auto-registered via Google Sign-In (user_id=%s).", roll_no, user_id)
+        else:
+            # No matching record of any kind -- self-register a brand-new
+            # account AS whichever role the visitor selected before
+            # clicking "Sign in with Google". See module docstring's
+            # "GOOGLE SIGN-IN" section for the explicit trade-off this
+            # accepts (open self-registration, including for Admin).
+            username = _generate_username_from_google_email(google_email)
+            user_id = _insert_user_row(
+                username=username, password=_random_unusable_password(), role=expected_role,
+                force_password_change=False, google_email=google_email,
+            )
+            logger.info(
+                "New %s account '%s' self-registered via Google Sign-In (user_id=%s).",
+                expected_role, username, user_id,
             )
 
-        roll_no = student_row["roll_no"]
-        already_has_login = fetch_one("SELECT user_id FROM users WHERE username = ?", (roll_no,))
-        if already_has_login is not None:
-            raise AuthenticationError(
-                f"A login already exists for roll number '{roll_no}', but it is not linked "
-                "to this Google email yet. Log in with your username and password instead, "
-                "then ask an administrator to link your Google account."
-            )
-
-        # _insert_user_row(), not create_user(): roll_no came straight
-        # from our own students table, already validated (and
-        # normalised) when that record was created -- see
-        # _insert_user_row()'s docstring for why running it through
-        # create_user()'s OWN validate_username() on top of that would
-        # be wrong, not just redundant, for a short roll number (e.g.
-        # this project's real data: roll_no "1" and "2").
-        user_id = _insert_user_row(
-            username=roll_no, password=_random_unusable_password(), role=config.ROLE_STUDENT,
-            force_password_change=False, google_email=google_email,
-        )
-        logger.info("Student '%s' auto-registered via Google Sign-In (user_id=%s).", roll_no, user_id)
         existing = fetch_one(
             "SELECT user_id, username, role, is_active, must_change_password FROM users WHERE user_id = ?",
             (user_id,),
