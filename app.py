@@ -292,13 +292,14 @@ def render_role_login_form(role: str) -> None:
     there is no separate "is this the right portal" check for an
     attacker to find a gap in.
 
-    THE "SIGN IN WITH GOOGLE" BUTTON DOES NOT FOLLOW THE SAME RULE, ON
-    PURPOSE: it authenticates by Google identity alone and routes to
-    whatever role that Google account is actually linked to in the
-    database, regardless of which of these three portal pages the button
-    was clicked from -- see modules/auth.py's authenticate_with_google()
-    docstring for why that asymmetry with the password login above is
-    intentional, not an oversight.
+    THE "SIGN IN WITH GOOGLE" BUTTON FOLLOWS THE SAME RULE: without
+    auth.prepare_google_login(role) below, a Teacher's linked Google
+    account could sign them in as Teacher even from THIS Student view --
+    Google Sign-In had no concept of "which portal" until this call
+    remembered it across the redirect to Google and back (see that
+    function's docstring for why st.session_state, specifically, is what
+    survives that round trip, and modules/auth.py's authenticate_with_google()
+    for where expected_role is actually enforced).
 
     Args:
         role: One of config.ROLE_ADMIN/ROLE_TEACHER/ROLE_STUDENT.
@@ -345,6 +346,10 @@ def render_role_login_form(role: str) -> None:
             ":material/login: Sign in with Google", use_container_width=True, key=f"{role}_google_login",
         ):
             try:
+                # Remembered across the redirect to Google and back, so
+                # this Google sign-in only succeeds AS this role -- see
+                # auth.prepare_google_login()'s docstring.
+                auth.prepare_google_login(role)
                 st.login("google")
             except StreamlitAuthError:
                 # Only reachable if [auth.google] isn't configured in

@@ -149,24 +149,6 @@ def test_link_google_account_lets_teacher_sign_in_with_google(test_db):
     assert logged_in["user_id"] == teacher_id
 
 
-def test_authenticate_with_google_is_not_scoped_to_any_portal(test_db):
-    # Deliberate, confirmed behaviour (see authenticate_with_google()'s
-    # docstring): a Google account's role always comes from the database,
-    # never from which of the three login pages the "Sign in with Google"
-    # button was clicked on. authenticate_with_google() takes no role
-    # argument at all -- there is nothing here for a caller to scope.
-    admin_user = _admin_user()
-    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
-    auth.link_google_account(teacher_id, "teacher1@gmail.com", admin_user)
-
-    # However this Google account got authenticated -- from the Admin,
-    # Teacher, or Student page's button -- the result is always the same:
-    # signed in as whatever role the account actually has.
-    logged_in = auth.authenticate_with_google("teacher1@gmail.com")
-    assert logged_in["role"] == config.ROLE_TEACHER
-    assert logged_in["user_id"] == teacher_id
-
-
 def test_link_google_account_rejects_duplicate_email(test_db):
     admin_user = _admin_user()
     teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
@@ -203,6 +185,67 @@ def test_unlink_google_account_rejects_when_nothing_linked(test_db):
 
     with pytest.raises(ValidationError):
         auth.unlink_google_account(teacher_id, admin_user)
+
+
+# ---------------------------------------------------------------------------
+# authenticate_with_google() -- expected_role (role-scoped Google Sign-In,
+# see app.py's render_role_login_form()/auth.prepare_google_login())
+# ---------------------------------------------------------------------------
+
+def test_authenticate_with_google_accepts_matching_expected_role(test_db):
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+    auth.link_google_account(teacher_id, "teacher1@gmail.com", admin_user)
+
+    user = auth.authenticate_with_google("teacher1@gmail.com", expected_role=config.ROLE_TEACHER)
+    assert user["user_id"] == teacher_id
+
+
+def test_authenticate_with_google_rejects_linked_account_of_a_different_role(test_db):
+    # Clicking "Sign in with Google" on the Student portal, with a Google
+    # account actually linked to a Teacher account, must fail -- not
+    # silently sign them in as the Teacher.
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+    auth.link_google_account(teacher_id, "teacher1@gmail.com", admin_user)
+
+    with pytest.raises(AuthenticationError):
+        auth.authenticate_with_google("teacher1@gmail.com", expected_role=config.ROLE_STUDENT)
+
+
+def test_authenticate_with_google_rejects_student_match_from_a_different_portal(test_db):
+    # A Google email matching an active student's own email, but clicked
+    # from the Admin login page -- must not auto-register/sign in as a
+    # Student anyway.
+    admin_user = _admin_user()
+    from modules import students
+    students.create_student("BCA0S1", "Alice", 1, "BCA", "alice@gmail.com", "9812345678", 2024, admin_user)
+
+    with pytest.raises(AuthenticationError):
+        auth.authenticate_with_google("alice@gmail.com", expected_role=config.ROLE_ADMIN)
+
+    # And no account was created as a side effect of the rejected attempt.
+    assert auth.fetch_one("SELECT user_id FROM users WHERE username = 'BCA0S1'") is None
+
+
+def test_authenticate_with_google_still_auto_registers_student_from_student_portal(test_db):
+    admin_user = _admin_user()
+    from modules import students
+    students.create_student("BCA0S1", "Alice", 1, "BCA", "alice@gmail.com", "9812345678", 2024, admin_user)
+
+    user = auth.authenticate_with_google("alice@gmail.com", expected_role=config.ROLE_STUDENT)
+    assert user["role"] == config.ROLE_STUDENT
+
+
+def test_authenticate_with_google_without_expected_role_ignores_role(test_db):
+    # Backward compatibility: expected_role=None (its default) behaves
+    # exactly as before role-scoped login pages existed.
+    admin_user = _admin_user()
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+    auth.link_google_account(teacher_id, "teacher1@gmail.com", admin_user)
+
+    user = auth.authenticate_with_google("teacher1@gmail.com")
+    assert user["user_id"] == teacher_id
 
 
 # ---------------------------------------------------------------------------
