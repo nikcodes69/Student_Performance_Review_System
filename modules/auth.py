@@ -108,6 +108,11 @@ logger = get_logger(__name__)
 # obvious bug instead of a silent one.
 SESSION_KEY_USER = "auth_user"
 SESSION_KEY_LAST_ACTIVITY = "auth_last_activity"
+# Set by prepare_google_login() right before st.login("google") redirects
+# to Google, read (and cleared) by try_google_login() after the round
+# trip back -- see prepare_google_login()'s docstring for why
+# st.session_state, specifically, is what survives that redirect.
+SESSION_KEY_GOOGLE_LOGIN_ROLE = "auth_google_login_role"
 
 
 # ---------------------------------------------------------------------------
@@ -618,7 +623,7 @@ def authenticate(username: str, password: str, expected_role: str | None = None)
     }
 
 
-def authenticate_with_google(google_email: str) -> dict:
+def authenticate_with_google(google_email: str, expected_role: str | None = None) -> dict:
     """
     The Google-authenticated counterpart to authenticate() -- see this
     module's docstring's "GOOGLE SIGN-IN" section for the full trust
@@ -630,6 +635,11 @@ def authenticate_with_google(google_email: str) -> dict:
 
     Args:
         google_email: The verified email address from st.user.email.
+        expected_role: If given, the ONLY role this Google sign-in is
+            allowed to succeed as -- set when the "Sign in with Google"
+            button was clicked from a specific role's login page (see
+            prepare_google_login()). None means "any role", the
+            behaviour before role-scoped login pages existed.
 
     Returns:
         A dict with keys "user_id", "username", "role",
@@ -641,8 +651,19 @@ def authenticate_with_google(google_email: str) -> dict:
         AuthenticationError: if google_email matches neither an already-
             linked account nor an active student record's own email, if
             it matches a student but a login already exists for that
-            roll_no under a DIFFERENT (unlinked) account, or if the
-            matched account has been deactivated.
+            roll_no under a DIFFERENT (unlinked) account, if the matched
+            account has been deactivated, or if expected_role is given
+            and the matched (or matchable) account's role doesn't equal it.
+
+    WHY A SPECIFIC "wrong portal" MESSAGE IS SAFE HERE, UNLIKE
+    authenticate()'s DELIBERATELY GENERIC "invalid credentials": that
+    genericness exists to prevent USERNAME ENUMERATION -- an attacker
+    guessing usernames/roles shouldn't get different feedback for "wrong
+    role" vs "no such user". That threat doesn't apply here: Google's own
+    OAuth step has ALREADY proven, before this function ever runs, that
+    the caller controls google_email. Telling them "this Google account
+    is registered as a Teacher" is telling them something about their
+    OWN account, not leaking anything about anyone else's.
     """
     google_email = validate_email(google_email)
 
@@ -651,6 +672,12 @@ def authenticate_with_google(google_email: str) -> dict:
         "FROM users WHERE google_email = ?",
         (google_email,),
     )
+
+    if existing is not None and expected_role is not None and existing["role"] != expected_role:
+        raise AuthenticationError(
+            f"This Google account is registered as {existing['role'].capitalize()}, not "
+            f"{expected_role.capitalize()}. Use the {existing['role'].capitalize()} login page instead."
+        )
 
     if existing is None:
         # No account linked to this Google email yet -- see if an ACTIVE
@@ -668,10 +695,31 @@ def authenticate_with_google(google_email: str) -> dict:
                     "choose a username and password first, then you can link your Google account "
                     "from the Change Password page."
                 )
+            if expected_role is None:
+                raise AuthenticationError(
+                    "No account is linked to this Google email. Students: make sure this is "
+                    "the email address on file for your roll number, or contact an administrator. "
+                    "Teachers/Admins: ask an administrator to invite you, or to link your Google account."
+                )
+            if expected_role == config.ROLE_STUDENT:
+                raise AuthenticationError(
+                    "No Student account is linked to this Google email. Make sure this is the "
+                    "email address on file for your roll number, or contact an administrator."
+                )
             raise AuthenticationError(
-                "No account is linked to this Google email. Students: make sure this is "
-                "the email address on file for your roll number, or contact an administrator. "
-                "Teachers/Admins: ask an administrator to invite you, or to link your Google account."
+                f"No {expected_role.capitalize()} account is linked to this Google email. "
+                "Ask an administrator to invite you, or to link your Google account."
+            )
+
+        # A student RECORD matches, but expected_role points at a
+        # different portal (e.g. this button was clicked on the
+        # Admin/Teacher login page) -- refuse rather than silently
+        # auto-registering and signing them in as a Student anyway, which
+        # would be confusing ("I clicked Admin login and it let me in?").
+        if expected_role is not None and expected_role != config.ROLE_STUDENT:
+            raise AuthenticationError(
+                f"This Google email matches a Student record, not {expected_role.capitalize()}. "
+                "Use the Student login page instead."
             )
 
         roll_no = student_row["roll_no"]
@@ -1152,6 +1200,30 @@ def login(username: str, password: str, expected_role: str | None = None) -> dic
     return user
 
 
+def prepare_google_login(role: str) -> None:
+    """
+    Call this immediately before st.login("google"), from a role-scoped
+    login page (see app.py's render_role_login_form()), so
+    try_google_login() below knows which role this sign-in attempt is
+    FOR once the browser returns from Google.
+
+    WHY st.session_state SURVIVES st.login()'s FULL-PAGE REDIRECT, UNLIKE
+    A NORMAL PYTHON VARIABLE: st.login() sends the browser away to
+    Google entirely (not an in-app rerun), then Google redirects it back
+    to this app's base URL -- a brand new page load. Streamlit's own
+    session-reconnection mechanism (the browser remembers its session id
+    across that navigation and presents it again when reconnecting)
+    is what makes st.session_state -- and only st.session_state, not a
+    plain module-level variable, which would reset -- still hold this
+    value afterward.
+
+    Args:
+        role: One of config.ROLE_ADMIN/ROLE_TEACHER/ROLE_STUDENT -- the
+            portal this "Sign in with Google" button was clicked from.
+    """
+    st.session_state[SESSION_KEY_GOOGLE_LOGIN_ROLE] = role
+
+
 def try_google_login() -> bool:
     """
     If this browser already has a verified Google identity (from a
@@ -1192,8 +1264,16 @@ def try_google_login() -> bool:
     except AttributeError:
         return False  # Google Sign-In not configured in secrets.toml
 
+    # Popped (not just read): a one-shot value, consumed by the very
+    # Google round-trip it was set for. None here just means "the
+    # 'Sign in with Google' button wasn't clicked from a role-scoped
+    # login page" (e.g. a stale identity cookie from before role-scoped
+    # pages existed) -- authenticate_with_google() treats that the same
+    # as before, no role restriction.
+    expected_role = st.session_state.pop(SESSION_KEY_GOOGLE_LOGIN_ROLE, None)
+
     try:
-        user = authenticate_with_google(google_email)
+        user = authenticate_with_google(google_email, expected_role=expected_role)
     except AuthenticationError as error:
         st.error(str(error))
         if st.button("Log Out of Google", key="google_auth_error_logout"):
