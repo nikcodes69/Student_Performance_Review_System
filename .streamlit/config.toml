@@ -32,3 +32,7 @@ textColor = "#F1F5F9"                # slate-100, near-white
 # here since this app accepts file-free forms only (no uploads), so a
 # small limit is appropriate and intentional, not a missing setting.
 maxUploadSize = 5
+# Pinned so the local URL never drifts between runs -- without this,
+# Streamlit defaults to 8501 but silently bumps to 8502/8503/... whenever
+# a previous run is still holding that port, changing the link every time.
+port = 8501
