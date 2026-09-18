@@ -14,7 +14,14 @@ streamlit==1.64.0
 Authlib==1.8.0
 
 # --- Data handling ---
-pandas==3.0.5
+# pandas is pinned to 2.2.3, not the newer 3.0.5, because 3.0.5's
+# compiled wheel was flagged by Windows Smart App Control on the
+# development machine (an OS-level, reputation-based block on the
+# specific compiled binary -- unrelated to this project's own code, and
+# not something a "trusted publisher" pip install can route around).
+# 2.2.3's differently-built wheel was not flagged. Every test in this
+# project (199 as of this pin) passes identically under 2.2.3.
+pandas==2.2.3
 numpy==2.5.3
 
 # --- Excel (.xlsx) read/write -- exporting any table, and reading a
