@@ -292,14 +292,17 @@ def render_role_login_form(role: str) -> None:
     there is no separate "is this the right portal" check for an
     attacker to find a gap in.
 
-    THE "SIGN IN WITH GOOGLE" BUTTON FOLLOWS THE SAME RULE: without
-    auth.prepare_google_login(role) below, a Teacher's linked Google
-    account could sign them in as Teacher even from THIS Student view --
-    Google Sign-In had no concept of "which portal" until this call
-    remembered it across the redirect to Google and back (see that
-    function's docstring for why st.session_state, specifically, is what
-    survives that round trip, and modules/auth.py's authenticate_with_google()
-    for where expected_role is actually enforced).
+    THE "SIGN IN WITH GOOGLE" BUTTON FOLLOWS THE SAME RULE, VIA A
+    DIFFERENT MECHANISM: st.login(role) below calls Streamlit's Google
+    OAuth flow through a NAMED PROVIDER matching this role ([auth.admin]/
+    [auth.teacher]/[auth.student] in secrets.toml -- same underlying
+    Google Client ID/Secret repeated three times under three names, not
+    three real separate Google apps). Which named provider was used
+    survives the redirect to Google and back inside Streamlit's OWN
+    signed identity cookie (st.user.provider) -- st.session_state does
+    NOT reliably survive that redirect (confirmed empirically; see
+    modules/auth.py's try_google_login() docstring for the full story and
+    why this replaced an earlier session_state-based attempt).
 
     Args:
         role: One of config.ROLE_ADMIN/ROLE_TEACHER/ROLE_STUDENT.
@@ -346,13 +349,13 @@ def render_role_login_form(role: str) -> None:
             ":material/login: Sign in with Google", use_container_width=True, key=f"{role}_google_login",
         ):
             try:
-                # Remembered across the redirect to Google and back, so
-                # this Google sign-in only succeeds AS this role -- see
-                # auth.prepare_google_login()'s docstring.
-                auth.prepare_google_login(role)
-                st.login("google")
+                # role itself IS the provider name here -- see this
+                # function's docstring and modules/auth.py's
+                # try_google_login() for why (st.user.provider, not
+                # session_state, is what carries this across the redirect).
+                st.login(role)
             except StreamlitAuthError:
-                # Only reachable if [auth.google] isn't configured in
+                # Only reachable if [auth.<role>] isn't configured in
                 # secrets.toml (a misconfigured/undeployed setup) --
                 # st.login() validates credentials itself before
                 # redirecting anywhere (see modules/auth.py's

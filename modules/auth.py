@@ -121,11 +121,6 @@ logger = get_logger(__name__)
 # obvious bug instead of a silent one.
 SESSION_KEY_USER = "auth_user"
 SESSION_KEY_LAST_ACTIVITY = "auth_last_activity"
-# Set by prepare_google_login() right before st.login("google") redirects
-# to Google, read (and cleared) by try_google_login() after the round
-# trip back -- see prepare_google_login()'s docstring for why
-# st.session_state, specifically, is what survives that redirect.
-SESSION_KEY_GOOGLE_LOGIN_ROLE = "auth_google_login_role"
 
 
 # ---------------------------------------------------------------------------
@@ -674,17 +669,20 @@ def authenticate_with_google(google_email: str, expected_role: str | None = None
     model this follows (deliberately open self-registration for every
     role, not pre-approval-gated like the username/password paths).
     Called from try_google_login() below, once Streamlit's own OAuth
-    round-trip (st.login("google")) has already confirmed google_email is
-    a real, provider-verified identity -- this function never itself
-    talks to Google or checks a password; its job is "map this already-
-    verified email to an app account, creating one if none exists yet".
+    round-trip (st.login(role) -- see that function's docstring for why
+    it's a per-role named provider, not a single shared "google" one) has
+    already confirmed google_email is a real, provider-verified identity
+    -- this function never itself talks to Google or checks a password;
+    its job is "map this already-verified email to an app account,
+    creating one if none exists yet".
 
     Args:
         google_email: The verified email address from st.user.email.
         expected_role: If given, the role this Google sign-in is FOR --
-            set when the "Sign in with Google" button was clicked from a
-            specific role's login page (see prepare_google_login()). Used
-            both to reject a mismatch against an EXISTING account's real
+            derived from st.user.provider (see try_google_login()), which
+            reflects which role's login page the "Sign in with Google"
+            button was clicked from. Used both to reject a mismatch
+            against an EXISTING account's real
             role, and as the role assigned to a brand-new self-registered
             account. None means "no role context available" (e.g. a
             stale identity cookie from before role-scoped login pages
@@ -1253,35 +1251,11 @@ def login(username: str, password: str, expected_role: str | None = None) -> dic
     return user
 
 
-def prepare_google_login(role: str) -> None:
-    """
-    Call this immediately before st.login("google"), from a role-scoped
-    login page (see app.py's render_role_login_form()), so
-    try_google_login() below knows which role this sign-in attempt is
-    FOR once the browser returns from Google.
-
-    WHY st.session_state SURVIVES st.login()'s FULL-PAGE REDIRECT, UNLIKE
-    A NORMAL PYTHON VARIABLE: st.login() sends the browser away to
-    Google entirely (not an in-app rerun), then Google redirects it back
-    to this app's base URL -- a brand new page load. Streamlit's own
-    session-reconnection mechanism (the browser remembers its session id
-    across that navigation and presents it again when reconnecting)
-    is what makes st.session_state -- and only st.session_state, not a
-    plain module-level variable, which would reset -- still hold this
-    value afterward.
-
-    Args:
-        role: One of config.ROLE_ADMIN/ROLE_TEACHER/ROLE_STUDENT -- the
-            portal this "Sign in with Google" button was clicked from.
-    """
-    st.session_state[SESSION_KEY_GOOGLE_LOGIN_ROLE] = role
-
-
 def try_google_login() -> bool:
     """
     If this browser already has a verified Google identity (from a
-    successful st.login("google") round-trip -- see app.py's
-    render_login_form()) but our OWN custom session (st.session_state)
+    successful st.login(role) round-trip -- see app.py's
+    render_role_login_form()) but our OWN custom session (st.session_state)
     doesn't know about it yet, map that identity to an app account via
     authenticate_with_google() and start a normal session for it -- the
     exact same session_state keys login() populates above, so every
@@ -1290,6 +1264,27 @@ def try_google_login() -> bool:
 
     Meant to be called once, unconditionally, at the very top of
     app.py's main() on every single script rerun.
+
+    HOW THE SELECTED ROLE SURVIVES THE REDIRECT TO GOOGLE AND BACK -- AND
+    WHY THIS ISN'T st.session_state: an earlier version of this function
+    read the role from a st.session_state key that render_role_login_form()
+    set right before calling st.login("google"). That does NOT work --
+    confirmed empirically (logs/app.log showed expected_role=None on
+    every single real attempt) -- because st.login() sends the browser
+    away to Google entirely, a brand-new page load when it returns, and
+    st.session_state does not reliably survive that round trip.
+
+    What DOES reliably survive it is Streamlit's own signed identity
+    cookie -- that is the entire mechanism behind st.user.is_logged_in
+    working at all after the redirect. So instead of a shared "google"
+    provider plus a side-channel for the role, this app configures THREE
+    NAMED PROVIDERS in secrets.toml ([auth.admin]/[auth.teacher]/
+    [auth.student], same underlying Google Client ID/Secret repeated
+    under three names -- see that file's comments). render_role_login_form()
+    calls st.login(role) with the role itself as the provider name, and
+    the identity cookie records which provider was used
+    (st.user.provider) -- reliably, because it rides on the same cookie
+    that already makes st.user.email/is_logged_in work.
 
     SAFE TO CALL EVEN WHEN GOOGLE SIGN-IN ISN'T CONFIGURED AT ALL:
     st.user.is_logged_in raises AttributeError (confirmed directly
@@ -1314,19 +1309,17 @@ def try_google_login() -> bool:
         if not st.user.is_logged_in:
             return False
         google_email = st.user.email
+        provider = st.user.get("provider")
     except AttributeError:
         return False  # Google Sign-In not configured in secrets.toml
 
-    # Popped (not just read): a one-shot value, consumed by the very
-    # Google round-trip it was set for. None here just means "the
-    # 'Sign in with Google' button wasn't clicked from a role-scoped
-    # login page" (e.g. a stale identity cookie from before role-scoped
-    # pages existed) -- authenticate_with_google() treats that the same
-    # as before, no role restriction.
-    expected_role = st.session_state.pop(SESSION_KEY_GOOGLE_LOGIN_ROLE, None)
+    # provider is whichever of "admin"/"teacher"/"student" was passed to
+    # st.login() -- already exactly a valid role, or None for an identity
+    # cookie from before this scheme existed (no role restriction then).
+    expected_role = provider if provider in config.VALID_ROLES else None
     logger.info(
-        "Google round-trip: email=%s expected_role=%r session_keys=%s",
-        google_email, expected_role, list(st.session_state.keys()),
+        "Google round-trip: email=%s provider=%r expected_role=%r",
+        google_email, provider, expected_role,
     )
 
     try:

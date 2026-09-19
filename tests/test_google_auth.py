@@ -192,7 +192,8 @@ def test_unlink_google_account_rejects_when_nothing_linked(test_db):
 
 # ---------------------------------------------------------------------------
 # authenticate_with_google() -- expected_role (role-scoped Google Sign-In,
-# see app.py's render_role_login_form()/auth.prepare_google_login())
+# derived from st.user.provider -- see app.py's render_role_login_form()
+# and auth.try_google_login()'s docstring for the full mechanism)
 # ---------------------------------------------------------------------------
 
 def test_authenticate_with_google_accepts_matching_expected_role(test_db):
