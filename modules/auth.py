@@ -1324,6 +1324,10 @@ def try_google_login() -> bool:
     # pages existed) -- authenticate_with_google() treats that the same
     # as before, no role restriction.
     expected_role = st.session_state.pop(SESSION_KEY_GOOGLE_LOGIN_ROLE, None)
+    logger.info(
+        "Google round-trip: email=%s expected_role=%r session_keys=%s",
+        google_email, expected_role, list(st.session_state.keys()),
+    )
 
     try:
         user = authenticate_with_google(google_email, expected_role=expected_role)
