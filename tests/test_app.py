@@ -135,3 +135,41 @@ def test_student_sees_only_student_pages(test_db):
     # of other students being exactly what this boundary protects.
     assert labels.isdisjoint(_STAFF_PAGES)
     assert labels.isdisjoint(_ADMIN_ONLY_PAGES)
+
+
+# ---------------------------------------------------------------------------
+# Server-side route protection, independent of the sidebar menu -- proves
+# auth.require_role() itself refuses a Teacher, not just that the Admin-only
+# page never appears as a clickable option (test_teacher_sees_only_staff_pages
+# above already proves that half). Calls the page function directly, bypassing
+# app.py's PAGES/sidebar routing entirely, via AppTest.from_string() so
+# require_role()'s st.stop() runs inside a real ScriptRunContext (outside one,
+# st.stop() is a silent no-op -- see utils/ui_security.py's module docstring
+# for the same class of AppTest-vs-bare-mode distinction).
+# ---------------------------------------------------------------------------
+
+_DIRECT_ADMIN_PAGE_SCRIPT = """
+import streamlit as st
+from modules import audit
+
+st.session_state["auth_user"] = {
+    "user_id": 5, "username": "teach1", "role": "teacher", "must_change_password": False,
+}
+from datetime import datetime
+st.session_state["auth_last_activity"] = datetime.now()
+
+audit.render_audit_log_page()
+st.write("REACHED_AUDIT_LOG_CONTENT")
+"""
+
+
+def test_admin_only_page_refuses_a_teacher_even_when_called_directly(test_db):
+    at = AppTest.from_string(_DIRECT_ADMIN_PAGE_SCRIPT)
+    at.run()
+
+    assert not at.exception
+    # require_role()'s own permission-denied message shown...
+    assert any("permission" in e.value.lower() for e in at.error)
+    # ...and the page's real content never rendered -- st.stop() inside
+    # require_role() actually halted the script, not merely logged a warning.
+    assert not any("REACHED_AUDIT_LOG_CONTENT" in m.value for m in at.markdown)
