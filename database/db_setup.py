@@ -299,6 +299,8 @@ def create_tables(conn) -> None:
                                                   AND {config.MAX_SEMESTER}),
                 exam_type    TEXT NOT NULL
                                  CHECK (exam_type IN ({_quoted_list(config.EXAM_TYPES)})),
+                is_published INTEGER NOT NULL DEFAULT 0
+                                 CHECK (is_published IN (0, 1)),
                 created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (roll_no) REFERENCES students (roll_no),
@@ -591,9 +593,10 @@ def migrate_schema(conn) -> None:
     Apply schema changes needed on a database that was created BEFORE a
     given column existed -- currently users.must_change_password (see
     modules/auth.py's forced-password-change feature), users.google_email
-    (see modules/auth.py's Google Sign-In support), and
+    (see modules/auth.py's Google Sign-In support),
     users.failed_login_attempts/locked_until (see modules/auth.py's
-    failed-login lockout).
+    failed-login lockout), and marks.is_published (see
+    modules/marks.py's publish_marks()).
 
     WHY THIS FUNCTION EXISTS, SEPARATE FROM create_tables(): every
     CREATE TABLE statement above uses "IF NOT EXISTS", which is a no-op
@@ -677,6 +680,35 @@ def migrate_schema(conn) -> None:
             _rebuild_subjects_and_marks_tables(conn)
             create_indexes(conn)  # marks' indexes were dropped along with the old table -- recreate them
             logger.info("Migrated subjects/marks tables to the fixed 25/50/25 marks breakdown.")
+
+        # is_published -- see modules/marks.py's publish_marks()/
+        # unpublish_marks(). Unlike max_internal/etc. above, this is a
+        # plain additive column with a CHECK that only references its own
+        # value (not other columns) -- confirmed directly against both
+        # backends that ALTER TABLE ADD COLUMN can carry that kind of
+        # CHECK, unlike a UNIQUE constraint (see google_email above) -- so
+        # a simple ALTER TABLE is enough here, no table rebuild needed.
+        marks_columns = {row[1] for row in cursor.execute("PRAGMA table_info(marks)").fetchall()}
+        if "is_published" not in marks_columns:
+            cursor.execute(
+                "ALTER TABLE marks ADD COLUMN is_published INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (is_published IN (0, 1))"
+            )
+            # Every row that already existed at migration time predates the
+            # publish/draft distinction entirely -- it was already visible
+            # to its student before this feature existed. Backfilling
+            # is_published=1 for exactly those rows (not the DEFAULT 0
+            # every NEW row gets from here on) preserves that visibility
+            # instead of silently hiding real marks a student could
+            # already see. This is a one-time UPDATE, not part of the
+            # column's own DEFAULT, specifically so it applies ONLY to
+            # rows that existed before this ALTER TABLE ran.
+            cursor.execute("UPDATE marks SET is_published = 1")
+            conn.commit()
+            logger.info(
+                "Migrated marks table: added is_published column, "
+                "backfilled existing rows as published."
+            )
 
     except (sqlite3.Error, ValueError) as error:
         # See create_tables()'s comment above for why ValueError is caught

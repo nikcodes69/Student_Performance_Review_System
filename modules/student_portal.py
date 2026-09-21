@@ -63,12 +63,21 @@ def render_student_portal_page() -> None:
     )
     semester_value = int(semester)
 
-    marks_rows = list_marks_for_student(roll_no, semester=semester_value)
+    marks_rows = list_marks_for_student(roll_no, semester=semester_value, published_only=True)
     attendance_rows = list_attendance_for_student(roll_no, semester=semester_value)
 
     st.subheader("Marks")
     if not marks_rows:
-        st.info("No marks recorded yet for this semester.")
+        # Distinguish "nothing entered yet" from "entered but not
+        # published yet" -- a second, unfiltered lookup, only run when
+        # needed (the common case, nothing entered at all, needs no
+        # extra query). Telling a student "results aren't published yet"
+        # is meaningfully different from implying no exam has happened.
+        any_drafts = bool(list_marks_for_student(roll_no, semester=semester_value))
+        if any_drafts:
+            st.info("Results for this semester are recorded but not published yet. Check back soon.")
+        else:
+            st.info("No marks recorded yet for this semester.")
     else:
         display_rows = [
             {

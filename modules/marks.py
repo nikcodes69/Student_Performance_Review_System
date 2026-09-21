@@ -51,7 +51,7 @@ IMPOSSIBLE for a stored percentage to go stale after a mark correction.
 import streamlit as st
 
 import config
-from database.db_manager import execute_transaction, fetch_all, fetch_one
+from database.db_manager import execute_transaction, execute_write, fetch_all, fetch_one
 from modules import auth, students, subjects
 from modules.audit import build_audit_entry
 from modules.grades import calculate_sgpa, evaluate_subject_marks
@@ -74,7 +74,7 @@ MARKS_WRITE_ROLES = (config.ROLE_ADMIN, config.ROLE_TEACHER)
 
 MARKS_COLUMNS = (
     "mark_id, roll_no, subject_code, internal, external, practical, "
-    "semester, exam_type, created_at, updated_at"
+    "semester, exam_type, is_published, created_at, updated_at"
 )
 
 
@@ -253,6 +253,130 @@ def update_marks(
     )
 
 
+def publish_marks(subject_code: str, semester: int, exam_type: str, acting_user: dict) -> int:
+    """
+    Publish every currently-DRAFT marks row for one subject/semester/
+    exam_type at once -- the moment a Student can first see them (see
+    list_marks_for_student()'s published_only parameter, used by
+    modules/student_portal.py). Marks entered via enter_marks() start
+    as drafts (is_published defaults to 0); nothing is visible to a
+    Student until an explicit publish action like this one.
+
+    WHY A BATCH ACTION, NOT PER-ROW: in practice a Teacher/Admin finishes
+    entering marks for a WHOLE CLASS before anyone should see any of it
+    -- publishing one student's mark while thirty others in the same
+    exam are still drafts would be a confusing partial release, not a
+    real result announcement.
+
+    WHY THE AFFECTED-ROW COUNT COMES FROM A SEPARATE SELECT COUNT(*),
+    NOT THE UPDATE'S OWN ROWCOUNT: database/db_manager.py's
+    execute_write() docstring documents that UPDATE rowcount is not
+    always reliable on the Turso backend -- this function needs an exact
+    count (to report it, and to detect "nothing to publish"), so it asks
+    with a plain SELECT instead, which does not have that reliability
+    caveat.
+
+    Args:
+        subject_code: The subject whose marks to publish.
+        semester: The semester.
+        exam_type: One of config.EXAM_TYPES.
+        acting_user: The logged-in user performing this action.
+
+    Returns:
+        How many rows were just published.
+
+    Raises:
+        AuthorizationError: if acting_user's role is neither Admin nor
+            Teacher, or (for a Teacher) they are not assigned to this subject.
+        ValidationError: if any field fails validation, or there are no
+            draft marks matching this selection to publish.
+    """
+    auth.check_permission(acting_user["role"], MARKS_WRITE_ROLES)
+
+    subject_code = validate_subject_code(subject_code)
+    semester = validate_semester(semester)
+    exam_type = validate_exam_type(exam_type)
+
+    check_teacher_subject_access(acting_user, subject_code)
+
+    draft_count = fetch_one(
+        "SELECT COUNT(*) AS draft_count FROM marks "
+        "WHERE subject_code = ? AND semester = ? AND exam_type = ? AND is_published = 0",
+        (subject_code, semester, exam_type),
+    )["draft_count"]
+    if draft_count == 0:
+        raise ValidationError(
+            f"No draft marks found for {subject_code} (semester {semester}, {exam_type}) to publish."
+        )
+
+    update_statement = (
+        "UPDATE marks SET is_published = 1, updated_at = CURRENT_TIMESTAMP "
+        "WHERE subject_code = ? AND semester = ? AND exam_type = ? AND is_published = 0",
+        (subject_code, semester, exam_type),
+    )
+    record_id = f"{subject_code}:{semester}:{exam_type}"
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "marks", record_id,
+        old_value={"is_published": False},
+        new_value={"is_published": True, "rows_published": draft_count},
+    )
+    execute_transaction([update_statement, audit_statement])
+
+    logger.info(
+        "Published %s marks row(s) for %s (semester=%s, exam_type=%s) by user_id=%s.",
+        draft_count, subject_code, semester, exam_type, acting_user["user_id"],
+    )
+    return draft_count
+
+
+def unpublish_marks(subject_code: str, semester: int, exam_type: str, acting_user: dict) -> int:
+    """
+    The reverse of publish_marks() -- puts every currently-PUBLISHED row
+    for this subject/semester/exam_type back into draft, e.g. to correct
+    a mistake discovered right after publishing, before a Student has
+    had a chance to see it.
+
+    Args/Returns/Raises: mirror publish_marks() exactly, with "published"
+    and "draft" swapped throughout.
+    """
+    auth.check_permission(acting_user["role"], MARKS_WRITE_ROLES)
+
+    subject_code = validate_subject_code(subject_code)
+    semester = validate_semester(semester)
+    exam_type = validate_exam_type(exam_type)
+
+    check_teacher_subject_access(acting_user, subject_code)
+
+    published_count = fetch_one(
+        "SELECT COUNT(*) AS published_count FROM marks "
+        "WHERE subject_code = ? AND semester = ? AND exam_type = ? AND is_published = 1",
+        (subject_code, semester, exam_type),
+    )["published_count"]
+    if published_count == 0:
+        raise ValidationError(
+            f"No published marks found for {subject_code} (semester {semester}, {exam_type}) to unpublish."
+        )
+
+    update_statement = (
+        "UPDATE marks SET is_published = 0, updated_at = CURRENT_TIMESTAMP "
+        "WHERE subject_code = ? AND semester = ? AND exam_type = ? AND is_published = 1",
+        (subject_code, semester, exam_type),
+    )
+    record_id = f"{subject_code}:{semester}:{exam_type}"
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "marks", record_id,
+        old_value={"is_published": True},
+        new_value={"is_published": False, "rows_unpublished": published_count},
+    )
+    execute_transaction([update_statement, audit_statement])
+
+    logger.info(
+        "Unpublished %s marks row(s) for %s (semester=%s, exam_type=%s) by user_id=%s.",
+        published_count, subject_code, semester, exam_type, acting_user["user_id"],
+    )
+    return published_count
+
+
 # ---------------------------------------------------------------------------
 # READ OPERATIONS (see modules/students.py's module docstring for why
 # these are not individually role-gated)
@@ -294,7 +418,10 @@ def get_marks_entry(roll_no: str, subject_code: str, semester: int, exam_type: s
 
 
 def list_marks_for_student(
-    roll_no: str, semester: int | None = None, exam_type: str | None = None
+    roll_no: str,
+    semester: int | None = None,
+    exam_type: str | None = None,
+    published_only: bool = False,
 ) -> list[dict]:
     """
     Fetch every marks row for one student, joined with each subject's
@@ -305,6 +432,12 @@ def list_marks_for_student(
         roll_no: The student to fetch marks for.
         semester: If given, only this semester.
         exam_type: If given, only this exam type.
+        published_only: If True, only rows with is_published = 1 --
+            modules/student_portal.py passes True so a Student never sees
+            a mark before Admin/Teacher has published it (see
+            publish_marks() below). Admin/Teacher's own views (Marks
+            Entry, Report Card) leave this False -- staff need to see
+            drafts to review/correct them before publishing.
 
     Returns:
         A list of dicts, each with the raw marks columns PLUS
@@ -315,7 +448,7 @@ def list_marks_for_student(
 
     query = (
         "SELECT m.mark_id, m.roll_no, m.subject_code, s.name AS subject_name, "
-        "m.internal, m.external, m.practical, "
+        "m.internal, m.external, m.practical, m.is_published, "
         "m.semester, m.exam_type, m.created_at, m.updated_at "
         "FROM marks m JOIN subjects s ON m.subject_code = s.subject_code "
         "WHERE m.roll_no = ?"
@@ -328,6 +461,8 @@ def list_marks_for_student(
     if exam_type is not None:
         query += " AND m.exam_type = ?"
         params.append(exam_type)
+    if published_only:
+        query += " AND m.is_published = 1"
 
     query += " ORDER BY m.semester, m.subject_code"
 
@@ -355,7 +490,7 @@ def list_marks_for_subject(
 
     query = (
         "SELECT m.mark_id, m.roll_no, st.name AS student_name, m.subject_code, "
-        "m.internal, m.external, m.practical, "
+        "m.internal, m.external, m.practical, m.is_published, "
         "m.semester, m.exam_type, m.created_at, m.updated_at "
         "FROM marks m "
         "JOIN students st ON m.roll_no = st.roll_no "
@@ -661,6 +796,35 @@ def render_marks_page() -> None:
         st.info("No marks entered yet for this selection.")
         return
 
+    draft_count = sum(1 for entry in current_marks if not entry["is_published"])
+    published_count = len(current_marks) - draft_count
+
+    st.caption(
+        f"{published_count} published, {draft_count} draft -- a Student cannot see a "
+        "draft mark until it's published (see publish_marks() in modules/marks.py)."
+    )
+    publish_col, unpublish_col = st.columns(2)
+    with publish_col:
+        if st.button(
+            f":material/publish: Publish results ({draft_count} draft)",
+            disabled=draft_count == 0, use_container_width=True,
+        ):
+            published_now = publish_marks(
+                selected_subject["subject_code"], semester_value, selected_exam_type, user,
+            )
+            st.success(f"Published {published_now} marks entry(ies).")
+            st.rerun()
+    with unpublish_col:
+        if st.button(
+            f":material/unpublished: Unpublish ({published_count} published)",
+            disabled=published_count == 0, use_container_width=True,
+        ):
+            unpublished_now = unpublish_marks(
+                selected_subject["subject_code"], semester_value, selected_exam_type, user,
+            )
+            st.warning(f"Unpublished {unpublished_now} marks entry(ies) -- back to draft.")
+            st.rerun()
+
     display_rows = [
         {
             "Roll No": entry["roll_no"],
@@ -671,6 +835,7 @@ def render_marks_page() -> None:
             "Percentage": entry["percentage"],
             "Grade": entry["grade_letter"],
             "Passed": "Yes" if entry["passed"] else "No",
+            "Status": "Published" if entry["is_published"] else "Draft",
         }
         for entry in current_marks
     ]

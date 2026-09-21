@@ -61,7 +61,7 @@ _BACKUP_TABLES: dict[str, str] = {
     ),
     "marks": (
         "SELECT mark_id, roll_no, subject_code, internal, external, practical, "
-        "semester, exam_type, created_at, updated_at FROM marks ORDER BY mark_id"
+        "semester, exam_type, is_published, created_at, updated_at FROM marks ORDER BY mark_id"
     ),
     "attendance": (
         "SELECT att_id, roll_no, subject_code, classes_held, classes_attended, "
