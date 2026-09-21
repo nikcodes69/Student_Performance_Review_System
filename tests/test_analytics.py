@@ -50,6 +50,9 @@ def test_db(tmp_path, monkeypatch):
         analytics.get_student_performance_trend,
         analytics.get_class_average_by_semester,
         analytics.get_dashboard_summary,
+        analytics.get_subject_averages,
+        analytics.get_subject_trend_by_cohort,
+        analytics.get_subject_pass_fail_breakdown,
     ):
         cached_fn.clear()
 
@@ -215,3 +218,79 @@ def test_student_vs_class_trend_empty_for_student_with_no_marks(test_db):
         ("S4", "Dave", 1, "BCA", "s4@example.com", "9812345678", 2024),
     )
     assert analytics.get_student_vs_class_trend("S4") == []
+
+
+# ---------------------------------------------------------------------------
+# get_subject_trend_by_cohort()
+# ---------------------------------------------------------------------------
+
+def test_subject_trend_groups_by_admission_year(test_db):
+    execute_write(
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        ("SUB1", "Fixture Subject", 1, 3),
+    )
+    # Two students admitted in 2023 (average 90%), one in 2024 (60%).
+    students_seed = [
+        ("S1", 2023, (25, 50, 15)),  # 90%
+        ("S2", 2023, (25, 50, 15)),  # 90%
+        ("S3", 2024, (15, 30, 15)),  # 60%
+    ]
+    for roll_no, admission_year, (internal, external, practical) in students_seed:
+        execute_write(
+            "INSERT INTO students (roll_no, name, semester, branch, email, phone, admission_year) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (roll_no, "Fixture Student", 1, "BCA", f"{roll_no.lower()}@example.com", "9812345678", admission_year),
+        )
+        execute_write(
+            "INSERT INTO marks (roll_no, subject_code, internal, external, practical, semester, exam_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (roll_no, "SUB1", internal, external, practical, 1, "regular"),
+        )
+
+    trend = analytics.get_subject_trend_by_cohort("SUB1")
+
+    assert trend == [
+        {"admission_year": 2023, "average_percentage": 90.0, "entry_count": 2},
+        {"admission_year": 2024, "average_percentage": 60.0, "entry_count": 1},
+    ]
+
+
+def test_subject_trend_empty_for_subject_with_no_marks(test_db):
+    execute_write(
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        ("SUB2", "Untouched Subject", 1, 3),
+    )
+    assert analytics.get_subject_trend_by_cohort("SUB2") == []
+
+
+# ---------------------------------------------------------------------------
+# get_teacher_performance_summary()
+# ---------------------------------------------------------------------------
+
+def test_teacher_performance_summary_only_includes_assigned_subjects(test_db):
+    from modules import auth, teacher_subjects
+
+    teacher_subjects.list_subjects_for_teacher.clear()
+    _seed_three_students_one_subject()  # SUB1, S1/S2/S3, average 71.67%
+    execute_write(
+        "INSERT INTO subjects (subject_code, name, semester, credits) VALUES (?, ?, ?, ?)",
+        ("SUB2", "Unassigned Subject", 1, 3),
+    )
+    admin_id = auth.create_user("admin", "AdminPass1!", config.ROLE_ADMIN)
+    admin_user = {"user_id": admin_id, "role": config.ROLE_ADMIN, "username": "admin"}
+    teacher_id = auth.create_user("teach1", "TeachPass1!", config.ROLE_TEACHER)
+    teacher_subjects.assign_teacher_to_subject(teacher_id, "SUB1", admin_user)
+
+    summary = analytics.get_teacher_performance_summary(teacher_id)
+
+    assert len(summary) == 1
+    assert summary[0]["subject_code"] == "SUB1"
+    assert summary[0]["pass_count"] + summary[0]["fail_count"] == 3
+
+
+def test_teacher_performance_summary_empty_for_unassigned_teacher(test_db):
+    from modules import auth, teacher_subjects
+
+    teacher_subjects.list_subjects_for_teacher.clear()
+    teacher_id = auth.create_user("teach2", "TeachPass1!", config.ROLE_TEACHER)
+    assert analytics.get_teacher_performance_summary(teacher_id) == []

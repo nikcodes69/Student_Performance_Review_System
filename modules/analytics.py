@@ -62,11 +62,12 @@ import streamlit as st
 
 import config
 from database.db_manager import fetch_all
-from modules import auth, students
+from modules import auth, students, subjects
 from modules.grades import calculate_percentage, get_grade, is_pass
+from modules.teacher_subjects import list_subjects_for_teacher
 from utils.logger import get_logger
 from utils.table_view import render_data_table
-from utils.validators import validate_roll_no
+from utils.validators import validate_roll_no, validate_subject_code
 
 logger = get_logger(__name__)
 
@@ -172,6 +173,95 @@ def get_subject_averages(semester: int | None = None) -> list[dict]:
     query += " GROUP BY s.subject_code, s.name ORDER BY s.subject_code"
 
     return [_round_field(dict(row), "average_percentage") for row in fetch_all(query, tuple(params))]
+
+
+@st.cache_data(ttl=60)
+def get_subject_trend_by_cohort(subject_code: str) -> list[dict]:
+    """
+    One subject's average percentage, grouped by admission_year -- the
+    closest thing this schema has to "is this subject's teaching getting
+    easier or harder over time".
+
+    WHY admission_year, NOT semester: a subject in this curriculum is
+    fixed to ONE semester (e.g. "Data Structures" is always a semester-3
+    subject) -- there is no meaningful "trend across semesters" for a
+    single subject_code the way get_student_performance_trend() has one
+    for a single STUDENT (who genuinely progresses through several
+    semesters). What a subject CAN meaningfully trend across is
+    different COHORTS of students taking it in different years --
+    students.admission_year, already captured for every student, is
+    exactly that grouping, with no new column needed.
+
+    Args:
+        subject_code: The subject to trace.
+
+    Returns:
+        A list of dicts: admission_year, average_percentage, entry_count.
+        Ordered by admission_year. Only years with at least one marks
+        entry for this subject appear.
+    """
+    subject_code = validate_subject_code(subject_code)
+
+    query = (
+        f"SELECT st.admission_year, AVG({PERCENTAGE_EXPR}) AS average_percentage, "
+        "COUNT(*) AS entry_count "
+        "FROM marks m "
+        "JOIN students st ON m.roll_no = st.roll_no "
+        "WHERE m.subject_code = ? "
+        "GROUP BY st.admission_year ORDER BY st.admission_year"
+    )
+    return [_round_field(dict(row), "average_percentage") for row in fetch_all(query, (subject_code,))]
+
+
+# ---------------------------------------------------------------------------
+# TEACHER-LEVEL ANALYTICS
+# ---------------------------------------------------------------------------
+
+def get_teacher_performance_summary(teacher_id: int) -> list[dict]:
+    """
+    Per-subject average percentage and pass rate, restricted to the
+    subjects ONE teacher is assigned to -- a department-review view of
+    "how are this teacher's classes doing", not an institution-wide one.
+
+    WHY THIS REUSES get_subject_averages()/get_subject_pass_fail_breakdown()
+    RATHER THAN A NEW JOIN QUERY: those two functions already compute
+    exactly the numbers needed, correctly, for every subject -- filtering
+    their results down to one teacher's assigned subject_codes (via
+    modules.teacher_subjects.list_subjects_for_teacher()) is simpler and
+    cannot drift out of sync with what the (Admin/Teacher-facing)
+    Analytics page already shows for those same subjects, unlike a
+    second, separately-written query computing the same thing again.
+
+    Args:
+        teacher_id: The Teacher account's user_id.
+
+    Returns:
+        A list of dicts: subject_code, subject_name, average_percentage,
+        entry_count, pass_count, fail_count. Ordered by subject_code.
+        Empty if this teacher has no subject assignments.
+    """
+    assigned_codes = {s["subject_code"] for s in list_subjects_for_teacher(teacher_id)}
+    if not assigned_codes:
+        return []
+
+    averages_by_code = {row["subject_code"]: row for row in get_subject_averages()}
+    pass_fail_by_code = {row["subject_code"]: row for row in get_subject_pass_fail_breakdown()}
+
+    summary = []
+    for code in sorted(assigned_codes):
+        average_row = averages_by_code.get(code)
+        pass_fail_row = pass_fail_by_code.get(code)
+        if average_row is None:
+            continue  # no marks entered yet for this subject -- nothing to summarise
+        summary.append({
+            "subject_code": code,
+            "subject_name": average_row["subject_name"],
+            "average_percentage": average_row["average_percentage"],
+            "entry_count": average_row["entry_count"],
+            "pass_count": pass_fail_row["pass_count"] if pass_fail_row else 0,
+            "fail_count": pass_fail_row["fail_count"] if pass_fail_row else 0,
+        })
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -884,6 +974,52 @@ def render_analytics_page() -> None:
         render_data_table(rankings_display, key_prefix="rankings_table", filename_prefix="class_rankings")
     else:
         st.info("No marks data available yet for this selection.")
+
+    st.divider()
+    st.subheader("Subject Trend by Admission Year")
+    st.caption(
+        "How one subject's average has moved across different admission-year cohorts -- "
+        "see get_subject_trend_by_cohort() for why admission year, not semester, is the "
+        "meaningful \"over time\" axis for a single subject."
+    )
+    all_subjects = subjects.list_subjects()
+    if all_subjects:
+        subject_labels = {f"{s['subject_code']} - {s['name']}": s["subject_code"] for s in all_subjects}
+        picked_subject_label = st.selectbox(
+            "Select a subject", options=list(subject_labels.keys()), key="cohort_trend_subject",
+        )
+        cohort_trend = get_subject_trend_by_cohort(subject_labels[picked_subject_label])
+        if cohort_trend:
+            fig = px.line(
+                pd.DataFrame(cohort_trend), x="admission_year", y="average_percentage",
+                markers=True, hover_data=["entry_count"],
+                title=f"{picked_subject_label}: Average by Admission-Year Cohort",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No marks recorded yet for this subject.")
+    else:
+        st.info("No subjects found.")
+
+    if auth.get_current_user()["role"] == config.ROLE_TEACHER:
+        st.divider()
+        st.subheader("My Subjects' Performance")
+        st.caption("Average percentage and pass/fail counts, restricted to subjects you're assigned to.")
+        teacher_summary = get_teacher_performance_summary(auth.get_current_user()["user_id"])
+        if teacher_summary:
+            summary_display = [
+                {
+                    "Subject": f"{row['subject_code']} - {row['subject_name']}",
+                    "Average %": row["average_percentage"],
+                    "Entries": row["entry_count"],
+                    "Passed": row["pass_count"],
+                    "Failed": row["fail_count"],
+                }
+                for row in teacher_summary
+            ]
+            render_data_table(summary_display, key_prefix="teacher_summary_table", filename_prefix="my_subjects_performance")
+        else:
+            st.info("No marks recorded yet for any subject you're assigned to.")
 
 
 # ---------------------------------------------------------------------------
