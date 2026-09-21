@@ -901,3 +901,32 @@ def validate_calendar_date(date_value: str, field_name: str) -> str:
         raise ValidationError(f"{field_name} must be a valid date in YYYY-MM-DD format.") from error
 
     return date_value
+
+
+# ---------------------------------------------------------------------------
+# MESSAGE FIELDS (used by modules/messaging.py)
+# ---------------------------------------------------------------------------
+
+def validate_message_body(body: str) -> str:
+    """
+    Validate a direct message's body text.
+
+    Rules: required, at most config.MESSAGE_BODY_MAX_LENGTH characters.
+
+    Args:
+        body: The raw message text.
+
+    Returns:
+        The body with whitespace stripped.
+
+    Raises:
+        ValidationError: if body is missing or too long.
+    """
+    body = _require_non_empty(body, "Message")
+
+    if len(body) > config.MESSAGE_BODY_MAX_LENGTH:
+        raise ValidationError(
+            f"Message cannot exceed {config.MESSAGE_BODY_MAX_LENGTH} characters."
+        )
+
+    return body

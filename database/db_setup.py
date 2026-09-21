@@ -591,6 +591,31 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # messages
+        # ---------------------------------------------------------------
+        # Direct 1:1 messages, Teacher<->Student only -- see
+        # modules/messaging.py's module docstring for why this is kept
+        # separate from announcements (a broadcast, one-to-many) and why
+        # Admin has no special visibility into it (private by design,
+        # unlike every other communication feature in this project, which
+        # is either Admin-visible or Admin-postable). No is_active/soft-
+        # delete column -- unlike an announcement or a remark, a sent
+        # message is never taken down; is_read is the only mutable field.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                message_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_id    INTEGER NOT NULL,
+                recipient_id INTEGER NOT NULL,
+                body         TEXT NOT NULL,
+                is_read      INTEGER NOT NULL DEFAULT 0
+                                 CHECK (is_read IN (0, 1)),
+                created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (sender_id) REFERENCES users (user_id),
+                FOREIGN KEY (recipient_id) REFERENCES users (user_id)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # semesters
         # ---------------------------------------------------------------
         # This table has no single-column primary key -- (roll_no,
@@ -716,6 +741,8 @@ def create_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_announcement_reads_user_id ON announcement_reads (user_id)",
         "CREATE INDEX IF NOT EXISTS idx_academic_calendar_events_start_date "
         "ON academic_calendar_events (start_date)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_sender_id ON messages (sender_id)",
+        "CREATE INDEX IF NOT EXISTS idx_messages_recipient_id ON messages (recipient_id)",
     ]
 
     try:

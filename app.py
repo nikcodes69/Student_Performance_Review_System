@@ -44,7 +44,7 @@ from streamlit.errors import StreamlitAuthError
 import config
 from modules import (
     academic_calendar, analytics, announcements, assignments, attendance, audit, auth,
-    grade_appeals, ml_predictions, marks, search, student_portal, students, subjects,
+    grade_appeals, messaging, ml_predictions, marks, search, student_portal, students, subjects,
     teacher_remarks,
 )
 from utils.pdf_generator import render_class_report_page, render_report_card_page
@@ -87,6 +87,7 @@ HOME_SECTIONS = [
     ("Grade Appeals", ":material/gavel:", config.VALID_ROLES, "Dispute or review a published result"),
     ("Student Remarks", ":material/rate_review:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Leave notes on a student's record"),
     ("Academic Calendar", ":material/event:", config.VALID_ROLES, "Semester dates, exam windows, holidays"),
+    ("Messages", ":material/chat:", (config.ROLE_TEACHER, config.ROLE_STUDENT), "Direct messages between a Teacher and a Student"),
     ("Change Password", ":material/password:", config.VALID_ROLES, "Update your own login password"),
 ]
 
@@ -159,6 +160,7 @@ PAGES = {
     "Grade Appeals": (config.VALID_ROLES, grade_appeals.render_grade_appeals_page),
     "Student Remarks": ((config.ROLE_ADMIN, config.ROLE_TEACHER), teacher_remarks.render_remarks_page),
     "Academic Calendar": (config.VALID_ROLES, academic_calendar.render_calendar_page),
+    "Messages": ((config.ROLE_TEACHER, config.ROLE_STUDENT), messaging.render_messages_page),
     "Change Password": (config.VALID_ROLES, auth.render_change_password_page),
 }
 
@@ -583,17 +585,26 @@ def render_authenticated_view(user: dict) -> None:
         label for label, (roles, _render_fn) in PAGES.items() if user["role"] in roles
     ]
 
-    # A real "N unread" count next to the Announcements entry, rather
-    # than a UI that always looks the same whether there's something new
-    # or not -- see modules/announcements.py's get_unread_announcement_count().
+    # A real "N unread" count next to the Announcements/Messages entries,
+    # rather than a UI that always looks the same whether there's
+    # something new or not -- see modules/announcements.py's
+    # get_unread_announcement_count() and modules/messaging.py's
+    # get_unread_message_count(). Messages is Teacher/Student only, so
+    # its count is only computed for those roles -- Admin never has an
+    # unread message count to show in the first place.
     unread_announcements = announcements.get_unread_announcement_count(user)
+    unread_messages = (
+        messaging.get_unread_message_count(user) if user["role"] in messaging.MESSAGING_ROLES else 0
+    )
+    unread_counts = {"Announcements": unread_announcements, "Messages": unread_messages}
 
     # format_func only changes how each option is DISPLAYED (prefixing its
-    # icon, and for Announcements, an unread count) -- the value
+    # icon, and an unread count where one applies) -- the value
     # st.sidebar.radio actually returns, and that `choice` gets used to
     # look up PAGES[choice] below, is still the plain label string.
     def _format_page_label(label: str) -> str:
-        suffix = f" ({unread_announcements})" if label == "Announcements" and unread_announcements else ""
+        count = unread_counts.get(label, 0)
+        suffix = f" ({count})" if count else ""
         return f"{PAGE_ICONS.get(label, '')} {label}{suffix}".strip()
 
     choice = st.sidebar.radio("Navigate", available_pages, format_func=_format_page_label)

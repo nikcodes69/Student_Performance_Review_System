@@ -137,6 +137,8 @@ TEACHER_REMARK_MAX_LENGTH = 500
 CALENDAR_EVENT_TITLE_MAX_LENGTH = 150
 CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH = 1000
 
+MESSAGE_BODY_MAX_LENGTH = 1000
+
 # A 10-digit local mobile number. Kept as a length constant rather than
 # hard-coded "10" inside validators.py.
 PHONE_LENGTH = 10
@@ -316,7 +318,7 @@ AUDIT_ACTIONS = (AUDIT_INSERT, AUDIT_UPDATE, AUDIT_SOFT_DELETE)
 AUDITED_TABLES = (
     "students", "subjects", "marks", "attendance", "semesters", "users",
     "assignments", "teacher_subjects", "pending_accounts", "auth_events",
-    "announcements", "grade_appeals", "teacher_remarks", "academic_calendar_events",
+    "announcements", "grade_appeals", "teacher_remarks", "academic_calendar_events", "messages",
 )
 
 # ---------------------------------------------------------------------------

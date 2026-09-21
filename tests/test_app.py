@@ -118,17 +118,19 @@ _STAFF_PAGES = {  # Admin and Teacher both
     "Analytics", "At-Risk Prediction", "Final Marks Prediction", "Student Segmentation",
     "Model Comparison", "Report Card", "Class Report", "Student Remarks",
 }
+_TEACHER_STUDENT_PAGES = {"Messages"}  # Teacher and Student both, never Admin
 _SHARED_PAGES = {"Home", "Announcements", "Grade Appeals", "Academic Calendar", "Change Password"}  # every role
 
 
 def test_admin_sees_every_page(test_db):
     labels = set(_sidebar_page_labels(_run_as(config.ROLE_ADMIN, "admin1")))
     assert labels == _SHARED_PAGES | _STAFF_PAGES | _ADMIN_ONLY_PAGES
+    assert "Messages" not in labels
 
 
 def test_teacher_sees_only_staff_pages(test_db):
     labels = set(_sidebar_page_labels(_run_as(config.ROLE_TEACHER, "teach1")))
-    assert labels == _SHARED_PAGES | _STAFF_PAGES
+    assert labels == _SHARED_PAGES | _STAFF_PAGES | _TEACHER_STUDENT_PAGES
     # Explicit negative checks -- these are the ones a Teacher must never
     # see, spelled out so a future accidental PAGES change fails loudly
     # and specifically, not just as "the set doesn't match".
@@ -139,7 +141,7 @@ def test_teacher_sees_only_staff_pages(test_db):
 
 def test_student_sees_only_student_pages(test_db):
     labels = set(_sidebar_page_labels(_run_as(config.ROLE_STUDENT, "S1")))
-    assert labels == _SHARED_PAGES | _STUDENT_ONLY_PAGES
+    assert labels == _SHARED_PAGES | _STUDENT_ONLY_PAGES | _TEACHER_STUDENT_PAGES
     # A Student must never see any staff or admin page, academic records
     # of other students being exactly what this boundary protects.
     assert labels.isdisjoint(_STAFF_PAGES)
