@@ -80,11 +80,13 @@ def _run_as(role: str, username: str) -> AppTest:
     # default_timeout=3 (AppTest's own default) was intermittently too
     # tight for this specific page -- it renders block_password_clipboard()'s
     # JS component on every run, and the Home page's dashboard summary
-    # query, which together occasionally push a cold run past 3 seconds
-    # under load, failing with a timeout that has nothing to do with the
-    # app itself being broken. 15s gives real headroom without letting a
+    # query, which together occasionally push a cold run past a few
+    # seconds when the whole test suite is running (CPU/IO contention
+    # from every other test running around the same time), even though
+    # this page always runs in a couple of seconds in isolation. 30s
+    # gives real headroom under full-suite load without letting a
     # genuinely hung script run for a long time undetected.
-    at = AppTest.from_file(str(_APP_PATH), default_timeout=15)
+    at = AppTest.from_file(str(_APP_PATH), default_timeout=30)
     at.session_state["auth_user"] = {
         "user_id": 1, "username": username, "role": role, "must_change_password": False,
     }
@@ -116,7 +118,7 @@ _STAFF_PAGES = {  # Admin and Teacher both
     "Analytics", "At-Risk Prediction", "Final Marks Prediction", "Student Segmentation",
     "Model Comparison", "Report Card", "Class Report",
 }
-_SHARED_PAGES = {"Home", "Change Password"}  # every role
+_SHARED_PAGES = {"Home", "Announcements", "Change Password"}  # every role
 
 
 def test_admin_sees_every_page(test_db):

@@ -635,3 +635,75 @@ def validate_table_name(table_name: str) -> str:
         raise ValidationError(f"table_name must be one of: {allowed}.")
 
     return table_name
+
+
+# ---------------------------------------------------------------------------
+# ANNOUNCEMENT FIELDS (used by modules/announcements.py)
+# ---------------------------------------------------------------------------
+
+def validate_announcement_title(title: str) -> str:
+    """
+    Validate an announcement's title.
+
+    Rules: required, at most config.ANNOUNCEMENT_TITLE_MAX_LENGTH characters.
+
+    Args:
+        title: The raw title.
+
+    Returns:
+        The title with whitespace stripped.
+
+    Raises:
+        ValidationError: if title is missing or too long.
+    """
+    title = _require_non_empty(title, "Title")
+
+    if len(title) > config.ANNOUNCEMENT_TITLE_MAX_LENGTH:
+        raise ValidationError(
+            f"Title cannot exceed {config.ANNOUNCEMENT_TITLE_MAX_LENGTH} characters."
+        )
+
+    return title
+
+
+def validate_announcement_message(message: str) -> str:
+    """
+    Validate an announcement's message body.
+
+    Rules: required, at most config.ANNOUNCEMENT_MESSAGE_MAX_LENGTH characters.
+
+    Args:
+        message: The raw message.
+
+    Returns:
+        The message with whitespace stripped.
+
+    Raises:
+        ValidationError: if message is missing or too long.
+    """
+    message = _require_non_empty(message, "Message")
+
+    if len(message) > config.ANNOUNCEMENT_MESSAGE_MAX_LENGTH:
+        raise ValidationError(
+            f"Message cannot exceed {config.ANNOUNCEMENT_MESSAGE_MAX_LENGTH} characters."
+        )
+
+    return message
+
+
+def validate_announcement_target_role(target_role: str | None) -> str | None:
+    """
+    Validate an announcement's target audience.
+
+    Args:
+        target_role: One of config.VALID_ROLES, or None for "every role".
+
+    Returns:
+        target_role, unchanged.
+
+    Raises:
+        ValidationError: if target_role is given but not one of config.VALID_ROLES.
+    """
+    if target_role is None:
+        return None
+    return validate_role(target_role)

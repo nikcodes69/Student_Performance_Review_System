@@ -126,6 +126,9 @@ PASSWORD_MIN_LENGTH = 8  # enforced at signup/creation time, before hashing
 NAME_MAX_LENGTH = 100
 ROLL_NO_MAX_LENGTH = 20
 
+ANNOUNCEMENT_TITLE_MAX_LENGTH = 150
+ANNOUNCEMENT_MESSAGE_MAX_LENGTH = 2000
+
 # A 10-digit local mobile number. Kept as a length constant rather than
 # hard-coded "10" inside validators.py.
 PHONE_LENGTH = 10
@@ -281,6 +284,7 @@ AUDIT_ACTIONS = (AUDIT_INSERT, AUDIT_UPDATE, AUDIT_SOFT_DELETE)
 AUDITED_TABLES = (
     "students", "subjects", "marks", "attendance", "semesters", "users",
     "assignments", "teacher_subjects", "pending_accounts", "auth_events",
+    "announcements",
 )
 
 # ---------------------------------------------------------------------------

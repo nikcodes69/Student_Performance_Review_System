@@ -42,7 +42,10 @@ import streamlit as st
 from streamlit.errors import StreamlitAuthError
 
 import config
-from modules import analytics, assignments, attendance, audit, auth, ml_predictions, marks, student_portal, students, subjects
+from modules import (
+    analytics, announcements, assignments, attendance, audit, auth,
+    ml_predictions, marks, student_portal, students, subjects,
+)
 from utils.pdf_generator import render_class_report_page, render_report_card_page
 from utils.exceptions import (
     AppError,
@@ -78,6 +81,7 @@ HOME_SECTIONS = [
     ("Audit Log", ":material/history:", (config.ROLE_ADMIN,), "Full history of every change"),
     ("User Management", ":material/manage_accounts:", (config.ROLE_ADMIN,), "Create Teacher/Admin accounts"),
     ("My Performance", ":material/person:", (config.ROLE_STUDENT,), "Your own marks, attendance, and predictions"),
+    ("Announcements", ":material/campaign:", config.VALID_ROLES, "Notices from Admin and Teachers"),
     ("Change Password", ":material/password:", config.VALID_ROLES, "Update your own login password"),
 ]
 
@@ -145,6 +149,7 @@ PAGES = {
     "Audit Log": ((config.ROLE_ADMIN,), audit.render_audit_log_page),
     "User Management": ((config.ROLE_ADMIN,), auth.render_user_management_page),
     "My Performance": ((config.ROLE_STUDENT,), student_portal.render_student_portal_page),
+    "Announcements": (config.VALID_ROLES, announcements.render_announcements_page),
     "Change Password": (config.VALID_ROLES, auth.render_change_password_page),
 }
 

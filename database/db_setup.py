@@ -427,6 +427,31 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # announcements
+        # ---------------------------------------------------------------
+        # target_role NULL means "visible to every role" -- a targeted
+        # announcement (e.g. Teacher-only) sets it to one of
+        # config.VALID_ROLES instead. is_active is the same soft-delete
+        # pattern used by students/subjects (see those tables): taking an
+        # announcement down keeps its row (and audit trail) rather than
+        # erasing history with a real DELETE.
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS announcements (
+                announcement_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title           TEXT NOT NULL,
+                message         TEXT NOT NULL,
+                posted_by       INTEGER NOT NULL,
+                target_role     TEXT
+                                    CHECK (target_role IS NULL
+                                           OR target_role IN ({_quoted_list(config.VALID_ROLES)})),
+                is_active       INTEGER NOT NULL DEFAULT 1
+                                    CHECK (is_active IN (0, 1)),
+                created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (posted_by) REFERENCES users (user_id)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # semesters
         # ---------------------------------------------------------------
         # This table has no single-column primary key -- (roll_no,
@@ -544,6 +569,7 @@ def create_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_audit_log_table_record "
         "ON audit_log (table_name, record_id)",
         "CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_announcements_target_role ON announcements (target_role)",
     ]
 
     try:
