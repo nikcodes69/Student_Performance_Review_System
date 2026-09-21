@@ -206,7 +206,10 @@ def render_announcements_page() -> None:
                 }[audience_choice]
                 try:
                     create_announcement(title, message, target_role, user)
-                    st.success("Announcement posted.")
+                    # st.toast(), not st.success() -- see app.py's
+                    # render_role_login_form() for why, wherever a message
+                    # is immediately followed by st.rerun().
+                    st.toast("Announcement posted.", icon=":material/check_circle:")
                     st.rerun()
                 except ValidationError as error:
                     st.error(str(error))
@@ -237,4 +240,5 @@ def render_announcements_page() -> None:
                     "Take down", key=f"deactivate_announcement_{entry['announcement_id']}",
                 ):
                     deactivate_announcement(entry["announcement_id"], user)
+                    st.toast("Announcement taken down.", icon=":material/check_circle:")
                     st.rerun()

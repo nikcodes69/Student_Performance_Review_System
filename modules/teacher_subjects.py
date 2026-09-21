@@ -306,7 +306,10 @@ def render_teacher_assignment_section(subject_code: str, acting_user: dict) -> N
             if st.button("Assign", key=f"assign_btn_{subject_code}"):
                 try:
                     assign_teacher_to_subject(teacher_labels[pick_label], subject_code, acting_user)
-                    st.success(f"'{pick_label}' assigned to '{subject_code}'.")
+                    # st.toast(), not st.success() -- see app.py's
+                    # render_role_login_form() for why, wherever a message
+                    # is immediately followed by st.rerun().
+                    st.toast(f"'{pick_label}' assigned to '{subject_code}'.", icon=":material/check_circle:")
                     st.rerun()
                 except (RecordNotFoundError, DuplicateRecordError) as error:
                     st.error(str(error))
@@ -322,7 +325,7 @@ def render_teacher_assignment_section(subject_code: str, acting_user: dict) -> N
             if st.button("Unassign", key=f"unassign_btn_{subject_code}"):
                 try:
                     unassign_teacher_from_subject(teacher_labels[pick_label], subject_code, acting_user)
-                    st.success(f"'{pick_label}' unassigned from '{subject_code}'.")
+                    st.toast(f"'{pick_label}' unassigned from '{subject_code}'.", icon=":material/check_circle:")
                     st.rerun()
                 except RecordNotFoundError as error:
                     st.error(str(error))

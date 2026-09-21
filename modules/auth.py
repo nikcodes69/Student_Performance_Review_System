@@ -1609,7 +1609,10 @@ def render_change_password_page(forced: bool = False) -> None:
                 # rerun, since it reads must_change_password straight from
                 # st.session_state, not a fresh database query.
                 st.session_state[SESSION_KEY_USER]["must_change_password"] = False
-                st.success("Password changed successfully.")
+                # st.toast(), not st.success() -- see app.py's
+                # render_role_login_form() for why, wherever a message is
+                # immediately followed by st.rerun().
+                st.toast("Password changed successfully.", icon=":material/check_circle:")
                 st.rerun()
             except (AuthenticationError, ValidationError) as error:
                 st.error(str(error))
@@ -1635,7 +1638,7 @@ def render_change_password_page(forced: bool = False) -> None:
             if link_submitted:
                 try:
                     self_link_google_account(user, link_email)
-                    st.success("Google account linked.")
+                    st.toast("Google account linked.", icon=":material/check_circle:")
                     st.rerun()
                 except (ValidationError, DuplicateRecordError) as error:
                     st.error(str(error))
@@ -1669,7 +1672,7 @@ def render_user_management_page() -> None:
     if create_submitted:
         try:
             create_user(new_username, new_password, new_role)
-            st.success(f"Account '{new_username}' created with role '{new_role}'.")
+            st.toast(f"Account '{new_username}' created with role '{new_role}'.", icon=":material/check_circle:")
             st.rerun()
         except (ValidationError, DuplicateRecordError) as error:
             st.error(str(error))
@@ -1690,7 +1693,7 @@ def render_user_management_page() -> None:
     if invite_submitted:
         try:
             invite_account(invite_email, invite_role, current_user)
-            st.success(f"'{invite_email}' invited as {invite_role}.")
+            st.toast(f"'{invite_email}' invited as {invite_role}.", icon=":material/check_circle:")
             st.rerun()
         except (ValidationError, DuplicateRecordError) as error:
             st.error(str(error))
@@ -1713,7 +1716,7 @@ def render_user_management_page() -> None:
         if st.button("Revoke Selected Invite"):
             try:
                 revoke_invite(revoke_email_choice, current_user)
-                st.success(f"Invite for '{revoke_email_choice}' revoked.")
+                st.toast(f"Invite for '{revoke_email_choice}' revoked.", icon=":material/check_circle:")
                 st.rerun()
             except RecordNotFoundError as error:
                 st.error(str(error))
@@ -1752,7 +1755,7 @@ def render_user_management_page() -> None:
         ):
             try:
                 deactivate_user(selected_user["user_id"], current_user)
-                st.success(f"'{username_choice}' deactivated.")
+                st.toast(f"'{username_choice}' deactivated.", icon=":material/check_circle:")
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
@@ -1760,7 +1763,7 @@ def render_user_management_page() -> None:
         if not selected_user["is_active"] and st.button("Reactivate this account"):
             try:
                 reactivate_user(selected_user["user_id"], current_user)
-                st.success(f"'{username_choice}' reactivated.")
+                st.toast(f"'{username_choice}' reactivated.", icon=":material/check_circle:")
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
@@ -1792,7 +1795,7 @@ def render_user_management_page() -> None:
         if st.button("Unlink Google Account"):
             try:
                 unlink_google_account(selected_user["user_id"], current_user)
-                st.success(f"Google account unlinked for '{username_choice}'.")
+                st.toast(f"Google account unlinked for '{username_choice}'.", icon=":material/check_circle:")
                 st.rerun()
             except (ValidationError, RecordNotFoundError) as error:
                 st.error(str(error))
@@ -1803,7 +1806,7 @@ def render_user_management_page() -> None:
         if link_submitted:
             try:
                 link_google_account(selected_user["user_id"], new_google_email, current_user)
-                st.success(f"Google account linked for '{username_choice}'.")
+                st.toast(f"Google account linked for '{username_choice}'.", icon=":material/check_circle:")
                 st.rerun()
             except (ValidationError, RecordNotFoundError, DuplicateRecordError) as error:
                 st.error(str(error))

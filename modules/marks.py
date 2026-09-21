@@ -779,7 +779,10 @@ def render_marks_page() -> None:
                 errors.append(f"{roll_no}: {error}")
 
         if saved_count:
-            st.success(f"Saved marks for {saved_count} student(s).")
+            # st.toast(), not st.success() -- see app.py's
+            # render_role_login_form() for why, wherever a message is
+            # immediately followed by st.rerun().
+            st.toast(f"Saved marks for {saved_count} student(s).", icon=":material/check_circle:")
         if skipped_count:
             st.caption(f"{skipped_count} student(s) unchanged -- nothing written.")
         for error_message in errors:
@@ -812,7 +815,7 @@ def render_marks_page() -> None:
             published_now = publish_marks(
                 selected_subject["subject_code"], semester_value, selected_exam_type, user,
             )
-            st.success(f"Published {published_now} marks entry(ies).")
+            st.toast(f"Published {published_now} marks entry(ies).", icon=":material/check_circle:")
             st.rerun()
     with unpublish_col:
         if st.button(
@@ -822,7 +825,7 @@ def render_marks_page() -> None:
             unpublished_now = unpublish_marks(
                 selected_subject["subject_code"], semester_value, selected_exam_type, user,
             )
-            st.warning(f"Unpublished {unpublished_now} marks entry(ies) -- back to draft.")
+            st.toast(f"Unpublished {unpublished_now} marks entry(ies) -- back to draft.", icon=":material/unpublished:")
             st.rerun()
 
     display_rows = [

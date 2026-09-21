@@ -531,7 +531,10 @@ def render_attendance_page() -> None:
                 errors.append(f"{roll_no}: {error}")
 
         if saved_count:
-            st.success(f"Saved attendance for {saved_count} student(s).")
+            # st.toast(), not st.success() -- see app.py's
+            # render_role_login_form() for why, wherever a message is
+            # immediately followed by st.rerun().
+            st.toast(f"Saved attendance for {saved_count} student(s).", icon=":material/check_circle:")
         if skipped_count:
             st.caption(f"{skipped_count} student(s) unchanged -- nothing written.")
         for error_message in errors:

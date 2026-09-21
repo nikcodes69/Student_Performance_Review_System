@@ -608,7 +608,10 @@ def render_students_page() -> None:
                         new_roll_no, new_name, int(new_semester), new_branch,
                         new_email, new_phone, int(new_admission_year), user,
                     )
-                    st.success(f"Student '{created_roll_no}' created.")
+                    # st.toast(), not st.success() -- see app.py's
+                    # render_role_login_form() for why, wherever a message
+                    # is immediately followed by st.rerun().
+                    st.toast(f"Student '{created_roll_no}' created.", icon=":material/check_circle:")
                     st.rerun()
                 except (ValidationError, DuplicateRecordError) as error:
                     st.error(str(error))
@@ -664,7 +667,7 @@ def render_students_page() -> None:
                 branch=edit_branch, email=edit_email, phone=edit_phone,
                 admission_year=int(edit_admission_year),
             )
-            st.success("Student updated.")
+            st.toast("Student updated.", icon=":material/check_circle:")
             st.rerun()
         except (ValidationError, RecordNotFoundError) as error:
             st.error(str(error))
@@ -674,7 +677,7 @@ def render_students_page() -> None:
         if student["is_active"] and st.button("Deactivate this student"):
             try:
                 deactivate_student(roll_no_choice, user)
-                st.success(f"Student '{roll_no_choice}' deactivated.")
+                st.toast(f"Student '{roll_no_choice}' deactivated.", icon=":material/check_circle:")
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
@@ -682,7 +685,7 @@ def render_students_page() -> None:
         if not student["is_active"] and st.button("Reactivate this student"):
             try:
                 reactivate_student(roll_no_choice, user)
-                st.success(f"Student '{roll_no_choice}' reactivated.")
+                st.toast(f"Student '{roll_no_choice}' reactivated.", icon=":material/check_circle:")
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
@@ -718,7 +721,10 @@ def render_students_page() -> None:
         if st.button("Promote These Students", type="primary", disabled=not confirm_promotion):
             try:
                 promoted = promote_students(int(promote_from), user)
-                st.success(f"Promoted {len(promoted)} student(s) to semester {promote_from + 1}.")
+                st.toast(
+                    f"Promoted {len(promoted)} student(s) to semester {promote_from + 1}.",
+                    icon=":material/check_circle:",
+                )
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))

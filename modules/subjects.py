@@ -388,7 +388,10 @@ def render_subjects_page() -> None:
                     created_code = create_subject(
                         new_code, new_name, int(new_semester), int(new_credits), user,
                     )
-                    st.success(f"Subject '{created_code}' created.")
+                    # st.toast(), not st.success() -- see app.py's
+                    # render_role_login_form() for why, wherever a message
+                    # is immediately followed by st.rerun().
+                    st.toast(f"Subject '{created_code}' created.", icon=":material/check_circle:")
                     st.rerun()
                 except (ValidationError, DuplicateRecordError) as error:
                     st.error(str(error))
@@ -439,7 +442,7 @@ def render_subjects_page() -> None:
                 code_choice, user, name=edit_name, semester=int(edit_semester),
                 credits=int(edit_credits),
             )
-            st.success("Subject updated.")
+            st.toast("Subject updated.", icon=":material/check_circle:")
             st.rerun()
         except (ValidationError, RecordNotFoundError) as error:
             st.error(str(error))
@@ -449,7 +452,7 @@ def render_subjects_page() -> None:
         if subject["is_active"] and st.button("Deactivate this subject"):
             try:
                 deactivate_subject(code_choice, user)
-                st.success(f"Subject '{code_choice}' deactivated.")
+                st.toast(f"Subject '{code_choice}' deactivated.", icon=":material/check_circle:")
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
@@ -457,7 +460,7 @@ def render_subjects_page() -> None:
         if not subject["is_active"] and st.button("Reactivate this subject"):
             try:
                 reactivate_subject(code_choice, user)
-                st.success(f"Subject '{code_choice}' reactivated.")
+                st.toast(f"Subject '{code_choice}' reactivated.", icon=":material/check_circle:")
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))

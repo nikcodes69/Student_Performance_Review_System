@@ -275,7 +275,10 @@ def _render_student_view(user: dict) -> None:
                         roll_no, selected["subject_code"], selected["semester"],
                         selected["exam_type"], reason, user,
                     )
-                    st.success("Appeal submitted.")
+                    # st.toast(), not st.success() -- see app.py's
+                    # render_role_login_form() for why, wherever a message
+                    # is immediately followed by st.rerun().
+                    st.toast("Appeal submitted.", icon=":material/check_circle:")
                     st.rerun()
                 except ValidationError as error:
                     st.error(str(error))
@@ -320,7 +323,7 @@ def _render_reviewer_view(user: dict) -> None:
                 if st.button("Approve", key=f"approve_{entry['appeal_id']}", use_container_width=True):
                     try:
                         respond_to_appeal(entry["appeal_id"], True, response, user)
-                        st.success("Appeal approved.")
+                        st.toast("Appeal approved.", icon=":material/check_circle:")
                         st.rerun()
                     except ValidationError as error:
                         st.error(str(error))
@@ -328,7 +331,7 @@ def _render_reviewer_view(user: dict) -> None:
                 if st.button("Reject", key=f"reject_{entry['appeal_id']}", use_container_width=True):
                     try:
                         respond_to_appeal(entry["appeal_id"], False, response, user)
-                        st.warning("Appeal rejected.")
+                        st.toast("Appeal rejected.", icon=":material/thumb_down:")
                         st.rerun()
                     except ValidationError as error:
                         st.error(str(error))

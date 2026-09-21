@@ -339,7 +339,14 @@ def render_role_login_form(role: str) -> None:
         if submitted:
             try:
                 user = auth.login(username, password, expected_role=role)
-                st.success(f"Welcome, {user['username']}.")
+                # st.toast(), not st.success(): the st.rerun() right below
+                # replaces the whole page immediately, which would wipe out
+                # a st.success() banner before it's ever seen -- st.toast()
+                # is specifically designed to survive exactly one rerun
+                # right after it fires, so this message actually reaches
+                # the user (see this pattern repeated throughout the app
+                # everywhere a message is immediately followed by rerun()).
+                st.toast(f"Welcome, {user['username']}.", icon=":material/check_circle:")
                 # st.rerun() immediately restarts the script from the
                 # top. This matters because is_session_valid() (checked
                 # in main(), below) needs to run again to notice the
@@ -555,6 +562,7 @@ def render_authenticated_view(user: dict) -> None:
 
     if st.sidebar.button("Log Out", icon=":material/logout:", use_container_width=True):
         auth.logout()
+        st.toast("Logged out.", icon=":material/logout:")
         # Land back on the landing page, not whichever role-login view
         # this same browser session last visited before logging in --
         # logging out should feel like a fresh start, not resume mid-flow.
@@ -616,6 +624,11 @@ def main() -> None:
     # including why this is safe even when Google Sign-In isn't
     # configured at all.
     if auth.try_google_login():
+        # Mirrors render_role_login_form()'s own toast for the password
+        # login path -- st.toast(), not st.success(), because the
+        # st.rerun() right below would otherwise wipe out a st.success()
+        # banner before it's ever seen.
+        st.toast(f"Welcome, {auth.get_current_user()['username']}.", icon=":material/check_circle:")
         st.rerun()
 
     if auth.is_session_valid():
