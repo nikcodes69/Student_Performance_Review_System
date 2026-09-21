@@ -707,3 +707,57 @@ def validate_announcement_target_role(target_role: str | None) -> str | None:
     if target_role is None:
         return None
     return validate_role(target_role)
+
+
+# ---------------------------------------------------------------------------
+# GRADE APPEAL FIELDS (used by modules/grade_appeals.py)
+# ---------------------------------------------------------------------------
+
+def validate_appeal_reason(reason: str) -> str:
+    """
+    Validate a Student's stated reason for appealing a published mark.
+
+    Rules: required, at most config.APPEAL_REASON_MAX_LENGTH characters.
+
+    Args:
+        reason: The raw reason text.
+
+    Returns:
+        The reason with whitespace stripped.
+
+    Raises:
+        ValidationError: if reason is missing or too long.
+    """
+    reason = _require_non_empty(reason, "Reason")
+
+    if len(reason) > config.APPEAL_REASON_MAX_LENGTH:
+        raise ValidationError(
+            f"Reason cannot exceed {config.APPEAL_REASON_MAX_LENGTH} characters."
+        )
+
+    return reason
+
+
+def validate_appeal_response(response: str) -> str:
+    """
+    Validate a Teacher/Admin's response to a grade appeal.
+
+    Rules: required, at most config.APPEAL_RESPONSE_MAX_LENGTH characters.
+
+    Args:
+        response: The raw response text.
+
+    Returns:
+        The response with whitespace stripped.
+
+    Raises:
+        ValidationError: if response is missing or too long.
+    """
+    response = _require_non_empty(response, "Response")
+
+    if len(response) > config.APPEAL_RESPONSE_MAX_LENGTH:
+        raise ValidationError(
+            f"Response cannot exceed {config.APPEAL_RESPONSE_MAX_LENGTH} characters."
+        )
+
+    return response

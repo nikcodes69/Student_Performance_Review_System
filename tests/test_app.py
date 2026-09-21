@@ -118,7 +118,7 @@ _STAFF_PAGES = {  # Admin and Teacher both
     "Analytics", "At-Risk Prediction", "Final Marks Prediction", "Student Segmentation",
     "Model Comparison", "Report Card", "Class Report",
 }
-_SHARED_PAGES = {"Home", "Announcements", "Change Password"}  # every role
+_SHARED_PAGES = {"Home", "Announcements", "Grade Appeals", "Change Password"}  # every role
 
 
 def test_admin_sees_every_page(test_db):

@@ -454,6 +454,45 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # grade_appeals
+        # ---------------------------------------------------------------
+        # References roll_no/subject_code (not marks.mark_id) for the
+        # same reason modules/marks.py's audit_log record_id does not use
+        # mark_id either -- see that file's "WHY record_id FOR MARKS IS
+        # NOT mark_id" docstring section. An appeal is about "this
+        # student's result in this subject/semester/exam_type", a
+        # relationship that survives a mark being corrected (still the
+        # same mark_id) or, in principle, deleted and re-entered (a NEW
+        # mark_id) -- neither should orphan an appeal that is really about
+        # the same underlying exam result.
+        #
+        # reviewed_by/response/reviewed_at are all NULL until a
+        # Teacher/Admin acts on it (status is still 'pending') -- see
+        # modules/grade_appeals.py's respond_to_appeal().
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS grade_appeals (
+                appeal_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                roll_no      TEXT NOT NULL,
+                subject_code TEXT NOT NULL,
+                semester     INTEGER NOT NULL
+                                 CHECK (semester BETWEEN {config.MIN_SEMESTER}
+                                                  AND {config.MAX_SEMESTER}),
+                exam_type    TEXT NOT NULL
+                                 CHECK (exam_type IN ({_quoted_list(config.EXAM_TYPES)})),
+                reason       TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT '{config.APPEAL_PENDING}'
+                                 CHECK (status IN ({_quoted_list(config.APPEAL_STATUSES)})),
+                response     TEXT,
+                reviewed_by  INTEGER,
+                created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at  TEXT,
+                FOREIGN KEY (roll_no) REFERENCES students (roll_no),
+                FOREIGN KEY (subject_code) REFERENCES subjects (subject_code),
+                FOREIGN KEY (reviewed_by) REFERENCES users (user_id)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # semesters
         # ---------------------------------------------------------------
         # This table has no single-column primary key -- (roll_no,
@@ -572,6 +611,9 @@ def create_indexes(conn) -> None:
         "ON audit_log (table_name, record_id)",
         "CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log (user_id)",
         "CREATE INDEX IF NOT EXISTS idx_announcements_target_role ON announcements (target_role)",
+        "CREATE INDEX IF NOT EXISTS idx_grade_appeals_roll_no ON grade_appeals (roll_no)",
+        "CREATE INDEX IF NOT EXISTS idx_grade_appeals_subject_code ON grade_appeals (subject_code)",
+        "CREATE INDEX IF NOT EXISTS idx_grade_appeals_status ON grade_appeals (status)",
     ]
 
     try:
