@@ -324,3 +324,25 @@ CV_FOLDS = 5
 # and the live feature computation must agree on the same scale for
 # predictions to mean what the model was trained to expect.
 ASSIGNMENT_ENGAGEMENT_SCALE = 10
+
+# Thresholds used by modules/ml_predictions.py's generate_recommendations()
+# to decide which rule-based improvement tips to show an at-risk student.
+# Each rule compares one of the SAME 9 features the at-risk model itself
+# predicts from against a threshold -- wherever an existing, already-
+# meaningful threshold applies (ATTENDANCE_SHORTAGE_THRESHOLD above for
+# attendance_pct, PASS_PERCENTAGE for average_marks/internal_pct/
+# practical_pct), that constant is reused directly rather than inventing
+# a second, possibly-inconsistent number for the same real-world rule.
+# Only genuinely NEW judgment calls -- thresholds with no existing
+# equivalent elsewhere in the app -- get their own constant here:
+RECOMMENDATION_LOW_ENGAGEMENT_THRESHOLD = 7.0  # out of ASSIGNMENT_ENGAGEMENT_SCALE (10) -- below 70% submission rate
+# Percentage-point standard deviation across a student's internal/
+# external/practical averages (see _compute_live_features()'s
+# "consistency" feature) -- above this, the three components disagree
+# enough to be worth calling out as UNEVEN performance, not just low.
+RECOMMENDATION_HIGH_INCONSISTENCY_THRESHOLD = 15.0
+# The grade point (see GRADE_SCALE above) that PASS_PERCENTAGE (40%)
+# maps to -- used as the "previous semester SGPA was concerningly low"
+# threshold, so it stays the same "passing" line the rest of the app uses,
+# expressed on the SGPA's own 0-10 scale instead of a raw percentage.
+RECOMMENDATION_LOW_SGPA_THRESHOLD = 5.0

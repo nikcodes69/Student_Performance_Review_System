@@ -302,6 +302,112 @@ def predict_at_risk_for_student(roll_no: str, semester: int) -> dict:
     }
 
 
+def generate_recommendations(features: dict, semester: int) -> list[str]:
+    """
+    Rule-based, explainable improvement recommendations, built directly
+    from the SAME 9 features the at-risk model itself predicts from (see
+    predict_at_risk_for_student()'s "features_used") -- not a separate,
+    disconnected "advice" system layered on top.
+
+    DELIBERATELY RULE-BASED, NOT A CALL TO AN EXTERNAL AI/LLM SERVICE: no
+    new credentials, no per-call cost, no network dependency, and every
+    recommendation is exactly reproducible from the input features -- a
+    fixed set of feature values always produces the exact same
+    recommendations, which matters for something a Teacher might refer
+    back to later and expect to still make sense. Each threshold below
+    reuses an EXISTING config constant wherever this exact real-world
+    rule already exists elsewhere in the app (config.ATTENDANCE_
+    SHORTAGE_THRESHOLD, config.PASS_PERCENTAGE) -- see config.py's own
+    comments on the RECOMMENDATION_* constants for the few genuinely new
+    judgment calls this function needed its own threshold for.
+
+    Args:
+        features: A features_used dict (see predict_at_risk_for_student()) --
+            internal_pct, attendance_pct, practical_pct, average_marks,
+            consistency, improvement_rate, previous_sgpa, backlog_count,
+            assignments_submitted.
+        semester: The semester these features were computed for -- used
+            only to skip the previous_sgpa rule for semester 1, where
+            "previous_sgpa" is 0.0 because there IS no previous semester
+            (not because it was actually low; _compute_live_features()
+            cannot tell those two cases apart from the number alone, so
+            this function uses semester instead of guessing).
+
+    Returns:
+        A list of human-readable recommendation strings, most urgent
+        first (attendance and backlogs before finer-grained component
+        weaknesses). Empty if every feature is already within its
+        reasonable range -- expected for most students, and always
+        expected for anyone the model does not flag at_risk.
+    """
+    recommendations = []
+
+    if features["attendance_pct"] < config.ATTENDANCE_SHORTAGE_THRESHOLD:
+        recommendations.append(
+            f"Attendance is {features['attendance_pct']}%, below the "
+            f"{config.ATTENDANCE_SHORTAGE_THRESHOLD}% requirement. Prioritize attending "
+            "classes regularly -- this is usually the single fastest lever to pull."
+        )
+
+    if features["backlog_count"] > 0:
+        subject_word = "subject" if features["backlog_count"] == 1 else "subjects"
+        recommendations.append(
+            f"{features['backlog_count']} {subject_word} not yet passed in any attempt. "
+            "Clearing backlogs should take priority alongside current coursework, before "
+            "they compound further."
+        )
+
+    if features["average_marks"] < config.PASS_PERCENTAGE:
+        recommendations.append(
+            f"Overall average this semester is {features['average_marks']}%, below the "
+            f"{config.PASS_PERCENTAGE}% pass mark. Needs focused revision across subjects "
+            "broadly, not just one weak area."
+        )
+
+    if features["internal_pct"] < config.PASS_PERCENTAGE:
+        recommendations.append(
+            f"Internal assessment average is {features['internal_pct']}%. Internal marks "
+            "(class tests, quizzes, participation) are usually the most directly "
+            "controllable part of the final grade -- start there."
+        )
+
+    if features["practical_pct"] < config.PASS_PERCENTAGE:
+        recommendations.append(
+            f"Practical average is {features['practical_pct']}%. Spend more time on lab "
+            "work and practical assessments specifically."
+        )
+
+    if features["assignments_submitted"] < config.RECOMMENDATION_LOW_ENGAGEMENT_THRESHOLD:
+        recommendations.append(
+            f"Assignment engagement score is {features['assignments_submitted']}/"
+            f"{config.ASSIGNMENT_ENGAGEMENT_SCALE}. Submitting assignments consistently "
+            "and on time directly raises this and reflects steady effort to instructors."
+        )
+
+    if features["improvement_rate"] < 0:
+        recommendations.append(
+            f"Performance has DECLINED by {abs(features['improvement_rate'])} percentage "
+            "points compared to last semester -- this trend needs to be reversed, not "
+            "just this semester's marks improved in isolation."
+        )
+
+    if semester > config.MIN_SEMESTER and features["previous_sgpa"] < config.RECOMMENDATION_LOW_SGPA_THRESHOLD:
+        recommendations.append(
+            f"Previous semester's SGPA was {features['previous_sgpa']}, below "
+            f"{config.RECOMMENDATION_LOW_SGPA_THRESHOLD}. Consider seeking extra academic "
+            "support (tutoring, office hours) rather than relying on self-study alone."
+        )
+
+    if features["consistency"] > config.RECOMMENDATION_HIGH_INCONSISTENCY_THRESHOLD:
+        recommendations.append(
+            f"Performance is uneven across internal/external/practical components "
+            f"(spread of {features['consistency']} points). Identify the specific weak "
+            "component and focus effort there, rather than spreading it evenly."
+        )
+
+    return recommendations
+
+
 def predict_final_marks_for_student(roll_no: str, semester: int) -> dict:
     """
     Predict final percentage for an existing student.
@@ -538,6 +644,17 @@ def render_at_risk_page() -> None:
 
         if result["at_risk"]:
             st.error(f"At risk of failing -- predicted probability: {result['risk_probability']:.1%}")
+
+            recommendations = generate_recommendations(result["features_used"], semester)
+            if recommendations:
+                st.subheader(":material/lightbulb: How to improve")
+                st.caption(
+                    "Rule-based, built from this student's own feature values above -- "
+                    "not a generic list. See modules/ml_predictions.py's "
+                    "generate_recommendations() for exactly which threshold triggered each one."
+                )
+                for tip in recommendations:
+                    st.warning(tip, icon=":material/priority_high:")
         else:
             st.success(f"On track to pass -- predicted risk probability: {result['risk_probability']:.1%}")
 
