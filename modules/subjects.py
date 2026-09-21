@@ -40,7 +40,10 @@ from utils.validators import (
 
 logger = get_logger(__name__)
 
-SUBJECT_COLUMNS = "subject_code, name, semester, credits, is_active, created_at, updated_at"
+SUBJECT_COLUMNS = (
+    "subject_code, name, semester, credits, prerequisite_subject_code, "
+    "is_active, created_at, updated_at"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +242,78 @@ def reactivate_subject(subject_code: str, acting_user: dict) -> None:
     execute_transaction([update_statement, audit_statement])
     list_subjects.clear()  # invalidate the cached list -- see list_subjects()'s docstring
     logger.info("Subject '%s' reactivated by user_id=%s.", subject_code, acting_user["user_id"])
+
+
+def set_subject_prerequisite(
+    subject_code: str, prerequisite_subject_code: str | None, acting_user: dict,
+) -> None:
+    """
+    Set (or clear, by passing None) the subject a student must have
+    PASSED before marks can be entered for subject_code -- enforced by
+    modules/marks.py's enter_marks() at the point marks are actually
+    recorded, since this system has no separate "enrollment" step a
+    prerequisite could otherwise gate (a subject is simply available to
+    every student in its semester).
+
+    A DEDICATED function rather than one more optional field on
+    update_subject(): that function uses None to mean "leave this field
+    unchanged" for every field it takes, but here None is itself a valid,
+    meaningful target state (no prerequisite) -- reusing that convention
+    would make it impossible to ever CLEAR a prerequisite through it.
+
+    WHY A PREREQUISITE MUST BE IN AN EARLIER SEMESTER: this is what makes
+    a prerequisite CHAIN impossible to cycle -- semester numbers can only
+    ever decrease along a chain of prerequisites, never loop back to a
+    subject already visited. No separate cycle-detection is needed.
+
+    Args:
+        subject_code: The subject to set a prerequisite on.
+        prerequisite_subject_code: Another subject_code the student must
+            have passed first, in a STRICTLY EARLIER semester -- or None
+            to remove any existing prerequisite.
+        acting_user: The logged-in user performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if subject_code, or prerequisite_subject_code
+            (when given), does not exist.
+        ValidationError: if prerequisite_subject_code names subject_code
+            itself, or is not in an earlier semester.
+    """
+    auth.check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+    subject_code = validate_subject_code(subject_code)
+
+    existing = get_subject(subject_code, include_inactive=True)
+
+    if prerequisite_subject_code is not None:
+        prerequisite_subject_code = validate_subject_code(prerequisite_subject_code)
+        if prerequisite_subject_code == subject_code:
+            raise ValidationError("A subject cannot be its own prerequisite.")
+
+        prerequisite = get_subject(prerequisite_subject_code, include_inactive=True)
+        if prerequisite["semester"] >= existing["semester"]:
+            raise ValidationError(
+                f"Prerequisite '{prerequisite_subject_code}' (semester {prerequisite['semester']}) "
+                f"must belong to an earlier semester than '{subject_code}' (semester {existing['semester']})."
+            )
+
+    update_statement = (
+        "UPDATE subjects SET prerequisite_subject_code = ?, updated_at = CURRENT_TIMESTAMP "
+        "WHERE subject_code = ?",
+        (prerequisite_subject_code, subject_code),
+    )
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "subjects", subject_code,
+        old_value={"prerequisite_subject_code": existing["prerequisite_subject_code"]},
+        new_value={"prerequisite_subject_code": prerequisite_subject_code},
+    )
+
+    execute_transaction([update_statement, audit_statement])
+    list_subjects.clear()  # invalidate the cached list -- see list_subjects()'s docstring
+    logger.info(
+        "Subject '%s' prerequisite set to '%s' by user_id=%s.",
+        subject_code, prerequisite_subject_code, acting_user["user_id"],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +539,32 @@ def render_subjects_page() -> None:
                 st.rerun()
             except ValidationError as error:
                 st.error(str(error))
+
+    st.subheader("Prerequisite")
+    st.caption(
+        "Marks cannot be entered for this subject until the student has passed the "
+        "chosen prerequisite -- must be a subject from an earlier semester."
+    )
+    other_subjects = [s for s in subjects if s["subject_code"] != code_choice and s["semester"] < subject["semester"]]
+    prerequisite_options = {"None": None} | {
+        f"{s['subject_code']} - {s['name']} (semester {s['semester']})": s["subject_code"]
+        for s in other_subjects
+    }
+    current_label = next(
+        (label for label, code in prerequisite_options.items() if code == subject["prerequisite_subject_code"]),
+        "None",
+    )
+    prerequisite_choice = st.selectbox(
+        "Prerequisite subject", options=list(prerequisite_options.keys()),
+        index=list(prerequisite_options.keys()).index(current_label),
+    )
+    if st.button("Save prerequisite"):
+        try:
+            set_subject_prerequisite(code_choice, prerequisite_options[prerequisite_choice], user)
+            st.toast("Prerequisite updated.", icon=":material/check_circle:")
+            st.rerun()
+        except (ValidationError, RecordNotFoundError) as error:
+            st.error(str(error))
 
     st.subheader("Assigned Teachers")
     render_teacher_assignment_section(code_choice, user)

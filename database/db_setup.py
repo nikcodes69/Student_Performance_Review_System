@@ -247,19 +247,28 @@ def create_tables(conn) -> None:
         # for all of them). See migrate_schema() below for the one-time
         # table-rebuild that removed these columns from a database
         # created before this change.
+        # prerequisite_subject_code is nullable (most subjects have none)
+        # and self-referential -- see modules/subjects.py's
+        # validate_prerequisite() for why the FOREIGN KEY below can never
+        # form a cycle: a prerequisite is only ever accepted if it belongs
+        # to an EARLIER semester than the subject itself, and semester
+        # numbers can only ever decrease along a chain of prerequisites,
+        # never loop back.
         cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS subjects (
-                subject_code  TEXT PRIMARY KEY,
-                name          TEXT NOT NULL,
-                semester      INTEGER NOT NULL
-                                  CHECK (semester BETWEEN {config.MIN_SEMESTER}
-                                                   AND {config.MAX_SEMESTER}),
-                credits       INTEGER NOT NULL
-                                  CHECK (credits BETWEEN {config.MIN_CREDITS}
-                                                   AND {config.MAX_CREDITS}),
-                is_active     INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
-                created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                subject_code             TEXT PRIMARY KEY,
+                name                     TEXT NOT NULL,
+                semester                 INTEGER NOT NULL
+                                             CHECK (semester BETWEEN {config.MIN_SEMESTER}
+                                                              AND {config.MAX_SEMESTER}),
+                credits                  INTEGER NOT NULL
+                                             CHECK (credits BETWEEN {config.MIN_CREDITS}
+                                                              AND {config.MAX_CREDITS}),
+                prerequisite_subject_code TEXT,
+                is_active                INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+                created_at               TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at               TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (prerequisite_subject_code) REFERENCES subjects (subject_code)
             )
         """)
 
@@ -730,8 +739,10 @@ def migrate_schema(conn) -> None:
     modules/auth.py's forced-password-change feature), users.google_email
     (see modules/auth.py's Google Sign-In support),
     users.failed_login_attempts/locked_until (see modules/auth.py's
-    failed-login lockout), and marks.is_published (see
-    modules/marks.py's publish_marks()).
+    failed-login lockout), marks.is_published (see
+    modules/marks.py's publish_marks()), and
+    subjects.prerequisite_subject_code (see modules/subjects.py's
+    validate_prerequisite()).
 
     WHY THIS FUNCTION EXISTS, SEPARATE FROM create_tables(): every
     CREATE TABLE statement above uses "IF NOT EXISTS", which is a no-op
@@ -844,6 +855,21 @@ def migrate_schema(conn) -> None:
                 "Migrated marks table: added is_published column, "
                 "backfilled existing rows as published."
             )
+
+        # prerequisite_subject_code -- see modules/subjects.py's
+        # validate_prerequisite(). No FOREIGN KEY here, for the same
+        # reason google_email above carries no UNIQUE via ALTER TABLE:
+        # this is a plain additive nullable column, and the "must
+        # actually be an existing subject_code" guarantee is enforced at
+        # the Python validation layer instead (validate_prerequisite()
+        # calls get_subject() on it) -- consistent with this project's
+        # two-layer validation approach (see utils/validators.py's module
+        # docstring) rather than a new special case for one column.
+        subjects_columns = {row[1] for row in cursor.execute("PRAGMA table_info(subjects)").fetchall()}
+        if "prerequisite_subject_code" not in subjects_columns:
+            cursor.execute("ALTER TABLE subjects ADD COLUMN prerequisite_subject_code TEXT")
+            conn.commit()
+            logger.info("Migrated subjects table: added prerequisite_subject_code column.")
 
     except (sqlite3.Error, ValueError) as error:
         # See create_tables()'s comment above for why ValueError is caught

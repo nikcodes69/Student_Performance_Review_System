@@ -117,7 +117,9 @@ def enter_marks(
 
     Raises:
         AuthorizationError: if acting_user's role is neither Admin nor Teacher.
-        ValidationError: if any field fails validation.
+        ValidationError: if any field fails validation, or subject_code
+            has a prerequisite (see modules/subjects.py's
+            set_subject_prerequisite()) that roll_no has not yet passed.
         RecordNotFoundError: if the student or subject does not exist (or
             is inactive).
         DuplicateRecordError: if a marks entry already exists for this
@@ -134,7 +136,18 @@ def enter_marks(
 
     # Confirm the student and subject actually exist (and are active).
     students.get_student(roll_no)
-    subjects.get_subject(subject_code)
+    subject = subjects.get_subject(subject_code)
+
+    # Prerequisite gate -- see modules/subjects.py's set_subject_prerequisite()
+    # for why this is checked HERE, at the point marks are first entered,
+    # rather than at some separate "enrollment" step this system doesn't
+    # have.
+    prerequisite_code = subject["prerequisite_subject_code"]
+    if prerequisite_code and not has_passed_subject(roll_no, prerequisite_code):
+        raise ValidationError(
+            f"{roll_no} has not passed the prerequisite subject '{prerequisite_code}' yet -- "
+            f"marks cannot be entered for '{subject_code}' until they have."
+        )
 
     internal = validate_mark_value(internal, config.MAX_INTERNAL_MARKS, "internal")
     external = validate_mark_value(external, config.MAX_EXTERNAL_MARKS, "external")
@@ -467,6 +480,33 @@ def list_marks_for_student(
     query += " ORDER BY m.semester, m.subject_code"
 
     return [_with_evaluation(dict(row)) for row in fetch_all(query, tuple(params))]
+
+
+def has_passed_subject(roll_no: str, subject_code: str) -> bool:
+    """
+    Whether roll_no has ever recorded a PASSING mark in subject_code, in
+    ANY semester or exam_type (a backlog pass still counts) -- used by
+    enter_marks() to enforce modules/subjects.py's prerequisite gate.
+
+    Checks every marks row regardless of is_published: this is a staff-
+    side check performed by whoever is entering marks for a LATER
+    subject, not something shown to the student, so the same "see
+    everything" convention utils/pdf_generator.py's staff report card
+    uses (published_only=False) applies here too -- reused via
+    list_marks_for_student()'s own default rather than a new query.
+
+    Args:
+        roll_no: The student.
+        subject_code: The prerequisite subject to check.
+
+    Returns:
+        True if any recorded attempt at subject_code evaluates as a pass.
+    """
+    subject_code = validate_subject_code(subject_code)
+    return any(
+        row["passed"] for row in list_marks_for_student(roll_no)
+        if row["subject_code"] == subject_code
+    )
 
 
 def list_marks_for_subject(
