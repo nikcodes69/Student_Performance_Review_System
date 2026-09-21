@@ -580,14 +580,21 @@ def render_authenticated_view(user: dict) -> None:
     available_pages = [
         label for label, (roles, _render_fn) in PAGES.items() if user["role"] in roles
     ]
+
+    # A real "N unread" count next to the Announcements entry, rather
+    # than a UI that always looks the same whether there's something new
+    # or not -- see modules/announcements.py's get_unread_announcement_count().
+    unread_announcements = announcements.get_unread_announcement_count(user)
+
     # format_func only changes how each option is DISPLAYED (prefixing its
-    # icon) -- the value st.sidebar.radio actually returns, and that
-    # `choice` gets used to look up PAGES[choice] below, is still the
-    # plain label string.
-    choice = st.sidebar.radio(
-        "Navigate", available_pages,
-        format_func=lambda label: f"{PAGE_ICONS.get(label, '')} {label}".strip(),
-    )
+    # icon, and for Announcements, an unread count) -- the value
+    # st.sidebar.radio actually returns, and that `choice` gets used to
+    # look up PAGES[choice] below, is still the plain label string.
+    def _format_page_label(label: str) -> str:
+        suffix = f" ({unread_announcements})" if label == "Announcements" and unread_announcements else ""
+        return f"{PAGE_ICONS.get(label, '')} {label}{suffix}".strip()
+
+    choice = st.sidebar.radio("Navigate", available_pages, format_func=_format_page_label)
 
     _roles, render_fn = PAGES[choice]
 

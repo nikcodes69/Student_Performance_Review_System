@@ -165,3 +165,74 @@ def test_deactivate_rejects_already_inactive_announcement(test_db):
 
     with pytest.raises(ValidationError):
         announcements.deactivate_announcement(announcement_id, admin)
+
+
+# ---------------------------------------------------------------------------
+# mark_announcement_read() / get_unread_announcement_count()
+# ---------------------------------------------------------------------------
+
+def test_new_announcement_starts_unread(test_db):
+    admin = _admin_user()
+    student = _student_user()
+    announcements.create_announcement("Notice", "Message", None, admin)
+
+    assert announcements.get_unread_announcement_count(student) == 1
+    entries = announcements.list_announcements_for_role(
+        config.ROLE_STUDENT, viewer_user_id=student["user_id"],
+    )
+    assert entries[0]["is_read"] == 0
+
+
+def test_mark_announcement_read_clears_unread_count(test_db):
+    admin = _admin_user()
+    student = _student_user()
+    announcement_id = announcements.create_announcement("Notice", "Message", None, admin)
+
+    announcements.mark_announcement_read(announcement_id, student)
+
+    assert announcements.get_unread_announcement_count(student) == 0
+    entries = announcements.list_announcements_for_role(
+        config.ROLE_STUDENT, viewer_user_id=student["user_id"],
+    )
+    assert entries[0]["is_read"] == 1
+
+
+def test_mark_announcement_read_twice_is_a_harmless_no_op(test_db):
+    admin = _admin_user()
+    student = _student_user()
+    announcement_id = announcements.create_announcement("Notice", "Message", None, admin)
+
+    announcements.mark_announcement_read(announcement_id, student)
+    announcements.mark_announcement_read(announcement_id, student)  # must not raise
+
+    assert announcements.get_unread_announcement_count(student) == 0
+
+
+def test_read_status_is_per_user(test_db):
+    admin = _admin_user()
+    student1 = _student_user()
+    student2 = auth.create_user("student2", "StudentPass1!", config.ROLE_STUDENT)
+    student2_user = {"user_id": student2, "role": config.ROLE_STUDENT, "username": "student2"}
+    announcement_id = announcements.create_announcement("Notice", "Message", None, admin)
+
+    announcements.mark_announcement_read(announcement_id, student1)
+
+    assert announcements.get_unread_announcement_count(student1) == 0
+    assert announcements.get_unread_announcement_count(student2_user) == 1
+
+
+def test_unread_count_ignores_announcements_outside_role_audience(test_db):
+    admin = _admin_user()
+    student = _student_user()
+    announcements.create_announcement("Teacher notice", "Message", config.ROLE_TEACHER, admin)
+
+    assert announcements.get_unread_announcement_count(student) == 0
+
+
+def test_unread_count_ignores_inactive_announcements(test_db):
+    admin = _admin_user()
+    student = _student_user()
+    announcement_id = announcements.create_announcement("Notice", "Message", None, admin)
+    announcements.deactivate_announcement(announcement_id, admin)
+
+    assert announcements.get_unread_announcement_count(student) == 0

@@ -91,7 +91,9 @@ def create_announcement(
     return announcement_id
 
 
-def list_announcements_for_role(role: str, include_inactive: bool = False) -> list[dict]:
+def list_announcements_for_role(
+    role: str, include_inactive: bool = False, viewer_user_id: int | None = None,
+) -> list[dict]:
     """
     Every announcement visible to `role` -- either untargeted
     (target_role IS NULL) or aimed specifically at this role -- newest
@@ -102,18 +104,36 @@ def list_announcements_for_role(role: str, include_inactive: bool = False) -> li
         include_inactive: If True, also include deactivated announcements
             (used by the Admin/Teacher management view so a poster can
             see what they've taken down, not just what's currently live).
+        viewer_user_id: If given, each returned dict also carries
+            "is_read" (True/False) for THIS specific user, via a LEFT
+            JOIN against announcement_reads -- see mark_announcement_read().
+            Left as None (the default) whenever the caller doesn't need
+            read status, so existing callers/tests that never pass it see
+            no shape change at all.
 
     Returns:
         A list of dicts: announcement_id, title, message, target_role,
-        is_active, created_at, posted_by, posted_by_username.
+        is_active, created_at, posted_by, posted_by_username, and
+        is_read only when viewer_user_id was given.
     """
-    query = (
-        "SELECT a.announcement_id, a.title, a.message, a.target_role, a.is_active, "
-        "a.created_at, a.posted_by, u.username AS posted_by_username "
-        "FROM announcements a JOIN users u ON a.posted_by = u.user_id "
-        "WHERE (a.target_role IS NULL OR a.target_role = ?)"
+    select_columns = (
+        "a.announcement_id, a.title, a.message, a.target_role, a.is_active, "
+        "a.created_at, a.posted_by, u.username AS posted_by_username"
     )
-    params: list = [role]
+    query = f"SELECT {select_columns}"
+    params: list = []
+
+    if viewer_user_id is not None:
+        query += ", (r.user_id IS NOT NULL) AS is_read"
+
+    query += " FROM announcements a JOIN users u ON a.posted_by = u.user_id"
+
+    if viewer_user_id is not None:
+        query += " LEFT JOIN announcement_reads r ON r.announcement_id = a.announcement_id AND r.user_id = ?"
+        params.append(viewer_user_id)
+
+    query += " WHERE (a.target_role IS NULL OR a.target_role = ?)"
+    params.append(role)
 
     if not include_inactive:
         query += " AND a.is_active = 1"
@@ -127,6 +147,47 @@ def list_announcements_for_role(role: str, include_inactive: bool = False) -> li
     query += " ORDER BY a.created_at DESC, a.announcement_id DESC"
 
     return fetch_all(query, tuple(params))
+
+
+def mark_announcement_read(announcement_id: int, acting_user: dict) -> None:
+    """
+    Record that acting_user has viewed announcement_id. Safe to call
+    every time an announcement is displayed to them -- INSERT OR IGNORE
+    against announcement_reads' (announcement_id, user_id) PRIMARY KEY
+    makes a repeat call for an already-read announcement a harmless
+    no-op rather than an error or a duplicate row.
+
+    Args:
+        announcement_id: The announcement just shown to this user.
+        acting_user: The logged-in user viewing it.
+    """
+    execute_write(
+        "INSERT OR IGNORE INTO announcement_reads (announcement_id, user_id) VALUES (?, ?)",
+        (announcement_id, acting_user["user_id"]),
+    )
+
+
+def get_unread_announcement_count(acting_user: dict) -> int:
+    """
+    How many announcements visible to acting_user's role they have not
+    yet viewed -- the number a sidebar badge shows.
+
+    Args:
+        acting_user: The logged-in user.
+
+    Returns:
+        Count of active, visible-to-this-role announcements with no
+        matching announcement_reads row for this user.
+    """
+    row = fetch_one(
+        "SELECT COUNT(*) AS unread_count FROM announcements a "
+        "LEFT JOIN announcement_reads r "
+        "ON r.announcement_id = a.announcement_id AND r.user_id = ? "
+        "WHERE (a.target_role IS NULL OR a.target_role = ?) "
+        "AND a.is_active = 1 AND r.announcement_id IS NULL",
+        (acting_user["user_id"], acting_user["role"]),
+    )
+    return row["unread_count"]
 
 
 def deactivate_announcement(announcement_id: int, acting_user: dict) -> None:
@@ -216,7 +277,7 @@ def render_announcements_page() -> None:
 
     st.divider()
 
-    announcements = list_announcements_for_role(user["role"])
+    announcements = list_announcements_for_role(user["role"], viewer_user_id=user["user_id"])
     if not announcements:
         st.info("No announcements right now.")
         return
@@ -226,7 +287,8 @@ def render_announcements_page() -> None:
             "Everyone" if entry["target_role"] is None else f"{entry['target_role'].capitalize()} only"
         )
         with st.container(border=True):
-            st.markdown(f"**{entry['title']}**")
+            title_label = f"**{entry['title']}**" + ("  :material/fiber_new: NEW" if not entry["is_read"] else "")
+            st.markdown(title_label)
             st.caption(
                 f"Posted by {entry['posted_by_username']} on {entry['created_at']} -- {audience_label}"
             )
@@ -242,3 +304,12 @@ def render_announcements_page() -> None:
                     deactivate_announcement(entry["announcement_id"], user)
                     st.toast("Announcement taken down.", icon=":material/check_circle:")
                     st.rerun()
+
+        # Marked read as soon as it's rendered on this page -- the same
+        # "viewing it IS reading it" convention an email inbox uses, not
+        # a separate button to click. Done after the NEW badge is drawn
+        # above (using the is_read value fetched BEFORE this call), so
+        # the badge still shows for this one render even though it won't
+        # show again next time.
+        if not entry["is_read"]:
+            mark_announcement_read(entry["announcement_id"], user)

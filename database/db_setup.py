@@ -454,6 +454,35 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # announcement_reads
+        # ---------------------------------------------------------------
+        # One row per (announcement, user) once that user has viewed it --
+        # a real "N unread" count instead of a UI that just always shows
+        # every announcement as new. Composite PRIMARY KEY (no separate
+        # id column) is exactly the "natural pair uniquely identifies one
+        # fact" reasoning already used for the semesters table below: "did
+        # THIS user read THIS announcement" is fully described by the
+        # pair itself, and the PRIMARY KEY doubles as the constraint that
+        # makes marking the same announcement read twice a safe no-op
+        # (see modules/announcements.py's mark_announcement_read(), which
+        # relies on INSERT OR IGNORE against this exact key).
+        #
+        # NOT part of config.AUDITED_TABLES / audit_log: a read receipt is
+        # tracking data, not a change to a real academic record -- logging
+        # one audit row per announcement view would just be noise nobody
+        # would ever review, unlike an actual grade or account change.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS announcement_reads (
+                announcement_id INTEGER NOT NULL,
+                user_id         INTEGER NOT NULL,
+                read_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (announcement_id, user_id),
+                FOREIGN KEY (announcement_id) REFERENCES announcements (announcement_id),
+                FOREIGN KEY (user_id) REFERENCES users (user_id)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # grade_appeals
         # ---------------------------------------------------------------
         # References roll_no/subject_code (not marks.mark_id) for the
@@ -643,6 +672,7 @@ def create_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_grade_appeals_subject_code ON grade_appeals (subject_code)",
         "CREATE INDEX IF NOT EXISTS idx_grade_appeals_status ON grade_appeals (status)",
         "CREATE INDEX IF NOT EXISTS idx_teacher_remarks_roll_no ON teacher_remarks (roll_no)",
+        "CREATE INDEX IF NOT EXISTS idx_announcement_reads_user_id ON announcement_reads (user_id)",
     ]
 
     try:
