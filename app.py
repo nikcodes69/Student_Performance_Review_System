@@ -43,7 +43,7 @@ from streamlit.errors import StreamlitAuthError
 
 import config
 from modules import (
-    analytics, announcements, assignments, attendance, audit, auth,
+    academic_calendar, analytics, announcements, assignments, attendance, audit, auth,
     grade_appeals, ml_predictions, marks, search, student_portal, students, subjects,
     teacher_remarks,
 )
@@ -86,6 +86,7 @@ HOME_SECTIONS = [
     ("Announcements", ":material/campaign:", config.VALID_ROLES, "Notices from Admin and Teachers"),
     ("Grade Appeals", ":material/gavel:", config.VALID_ROLES, "Dispute or review a published result"),
     ("Student Remarks", ":material/rate_review:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Leave notes on a student's record"),
+    ("Academic Calendar", ":material/event:", config.VALID_ROLES, "Semester dates, exam windows, holidays"),
     ("Change Password", ":material/password:", config.VALID_ROLES, "Update your own login password"),
 ]
 
@@ -157,6 +158,7 @@ PAGES = {
     "Announcements": (config.VALID_ROLES, announcements.render_announcements_page),
     "Grade Appeals": (config.VALID_ROLES, grade_appeals.render_grade_appeals_page),
     "Student Remarks": ((config.ROLE_ADMIN, config.ROLE_TEACHER), teacher_remarks.render_remarks_page),
+    "Academic Calendar": (config.VALID_ROLES, academic_calendar.render_calendar_page),
     "Change Password": (config.VALID_ROLES, auth.render_change_password_page),
 }
 

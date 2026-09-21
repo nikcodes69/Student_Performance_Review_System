@@ -550,6 +550,38 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # academic_calendar_events
+        # ---------------------------------------------------------------
+        # Semester start/end dates, exam windows, holidays -- one row per
+        # scheduled event, Admin-managed (unlike announcements, which a
+        # Teacher can also post -- see modules/academic_calendar.py's
+        # module docstring for why this one stays Admin-only: it's
+        # official institutional scheduling, not a day-to-day notice).
+        # start_date/end_date are stored as TEXT in ISO 'YYYY-MM-DD' form
+        # deliberately -- lexicographic string comparison on that format
+        # is the same as chronological order, so the CHECK below and a
+        # plain "ORDER BY start_date" both just work, with no date-parsing
+        # needed inside SQLite itself. end_date is nullable: a single-day
+        # event (e.g. one exam, one holiday) needs only start_date.
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS academic_calendar_events (
+                event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                title       TEXT NOT NULL,
+                description TEXT,
+                event_type  TEXT NOT NULL
+                                CHECK (event_type IN ({_quoted_list(config.CALENDAR_EVENT_TYPES)})),
+                start_date  TEXT NOT NULL,
+                end_date    TEXT
+                                CHECK (end_date IS NULL OR end_date >= start_date),
+                created_by  INTEGER NOT NULL,
+                is_active   INTEGER NOT NULL DEFAULT 1
+                                CHECK (is_active IN (0, 1)),
+                created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (created_by) REFERENCES users (user_id)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # semesters
         # ---------------------------------------------------------------
         # This table has no single-column primary key -- (roll_no,
@@ -673,6 +705,8 @@ def create_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_grade_appeals_status ON grade_appeals (status)",
         "CREATE INDEX IF NOT EXISTS idx_teacher_remarks_roll_no ON teacher_remarks (roll_no)",
         "CREATE INDEX IF NOT EXISTS idx_announcement_reads_user_id ON announcement_reads (user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_academic_calendar_events_start_date "
+        "ON academic_calendar_events (start_date)",
     ]
 
     try:

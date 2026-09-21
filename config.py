@@ -134,6 +134,9 @@ APPEAL_RESPONSE_MAX_LENGTH = 1000
 
 TEACHER_REMARK_MAX_LENGTH = 500
 
+CALENDAR_EVENT_TITLE_MAX_LENGTH = 150
+CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH = 1000
+
 # A 10-digit local mobile number. Kept as a length constant rather than
 # hard-coded "10" inside validators.py.
 PHONE_LENGTH = 10
@@ -261,6 +264,21 @@ APPEAL_APPROVED = "approved"
 APPEAL_REJECTED = "rejected"
 APPEAL_STATUSES = (APPEAL_PENDING, APPEAL_APPROVED, APPEAL_REJECTED)
 
+# The kinds of entry the academic calendar can hold -- semester
+# start/end dates and exam windows are the two the module docstring
+# names explicitly; HOLIDAY/OTHER cover everything else an Admin might
+# need to publish (a public holiday, an orientation day) without forcing
+# it into one of the two academic categories it isn't.
+CALENDAR_EVENT_SEMESTER_START = "semester_start"
+CALENDAR_EVENT_SEMESTER_END = "semester_end"
+CALENDAR_EVENT_EXAM = "exam"
+CALENDAR_EVENT_HOLIDAY = "holiday"
+CALENDAR_EVENT_OTHER = "other"
+CALENDAR_EVENT_TYPES = (
+    CALENDAR_EVENT_SEMESTER_START, CALENDAR_EVENT_SEMESTER_END,
+    CALENDAR_EVENT_EXAM, CALENDAR_EVENT_HOLIDAY, CALENDAR_EVENT_OTHER,
+)
+
 # The three kinds of change audit_log can record. Deliberately does NOT
 # include a literal 'DELETE' -- this system never hard-deletes academic
 # records, so the true action taken when a record is deactivated is
@@ -298,7 +316,7 @@ AUDIT_ACTIONS = (AUDIT_INSERT, AUDIT_UPDATE, AUDIT_SOFT_DELETE)
 AUDITED_TABLES = (
     "students", "subjects", "marks", "attendance", "semesters", "users",
     "assignments", "teacher_subjects", "pending_accounts", "auth_events",
-    "announcements", "grade_appeals", "teacher_remarks",
+    "announcements", "grade_appeals", "teacher_remarks", "academic_calendar_events",
 )
 
 # ---------------------------------------------------------------------------

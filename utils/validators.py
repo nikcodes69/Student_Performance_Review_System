@@ -790,3 +790,114 @@ def validate_remark_text(remark: str) -> str:
         )
 
     return remark
+
+
+# ---------------------------------------------------------------------------
+# ACADEMIC CALENDAR FIELDS (used by modules/academic_calendar.py)
+# ---------------------------------------------------------------------------
+
+def validate_calendar_title(title: str) -> str:
+    """
+    Validate an academic calendar event's title.
+
+    Rules: required, at most config.CALENDAR_EVENT_TITLE_MAX_LENGTH characters.
+
+    Args:
+        title: The raw title.
+
+    Returns:
+        The title with whitespace stripped.
+
+    Raises:
+        ValidationError: if title is missing or too long.
+    """
+    title = _require_non_empty(title, "Title")
+
+    if len(title) > config.CALENDAR_EVENT_TITLE_MAX_LENGTH:
+        raise ValidationError(
+            f"Title cannot exceed {config.CALENDAR_EVENT_TITLE_MAX_LENGTH} characters."
+        )
+
+    return title
+
+
+def validate_calendar_description(description: str | None) -> str | None:
+    """
+    Validate an academic calendar event's OPTIONAL description -- unlike
+    validate_calendar_title() above, an empty/missing description is
+    valid (a one-line event like "College closed" often needs no more
+    detail), so this never calls _require_non_empty().
+
+    Rules: optional, at most config.CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH characters.
+
+    Args:
+        description: The raw description, or None.
+
+    Returns:
+        The description with whitespace stripped, or None if it was
+        missing/blank.
+
+    Raises:
+        ValidationError: if description is too long.
+    """
+    if description is None or not description.strip():
+        return None
+
+    description = description.strip()
+    if len(description) > config.CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH:
+        raise ValidationError(
+            f"Description cannot exceed {config.CALENDAR_EVENT_DESCRIPTION_MAX_LENGTH} characters."
+        )
+
+    return description
+
+
+def validate_calendar_event_type(event_type: str) -> str:
+    """
+    Validate an academic calendar event's type.
+
+    Args:
+        event_type: Must be one of config.CALENDAR_EVENT_TYPES.
+
+    Returns:
+        event_type, unchanged.
+
+    Raises:
+        ValidationError: if event_type is not one of config.CALENDAR_EVENT_TYPES.
+    """
+    if event_type not in config.CALENDAR_EVENT_TYPES:
+        raise ValidationError(
+            f"Event type must be one of: {', '.join(config.CALENDAR_EVENT_TYPES)}."
+        )
+    return event_type
+
+
+def validate_calendar_date(date_value: str, field_name: str) -> str:
+    """
+    Validate a calendar date string is a real, correctly-formatted date.
+
+    Rules: required, must parse as 'YYYY-MM-DD' (ISO 8601 date-only --
+    the same format database/db_setup.py's academic_calendar_events
+    table relies on for its "end_date >= start_date" CHECK constraint and
+    for a plain "ORDER BY start_date" to sort chronologically).
+
+    Args:
+        date_value: The raw date string.
+        field_name: Used in the error message (e.g. "Start date").
+
+    Returns:
+        date_value, unchanged (already in the canonical form once parsed
+        successfully).
+
+    Raises:
+        ValidationError: if date_value is missing or not a valid
+            'YYYY-MM-DD' date.
+    """
+    date_value = _require_non_empty(date_value, field_name)
+
+    try:
+        datetime.strptime(date_value, "%Y-%m-%d")
+    except ValueError as error:
+        raise ValidationError(f"{field_name} must be a valid date in YYYY-MM-DD format.") from error
+
+    return date_value
