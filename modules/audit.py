@@ -186,7 +186,15 @@ def get_audit_logs(
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
 
-    query += " ORDER BY timestamp DESC LIMIT ?"
+    # log_id DESC as a tiebreaker, not just timestamp DESC: timestamp has
+    # only SECOND resolution, so two entries written within the same
+    # second (e.g. an INSERT immediately followed by its own correction,
+    # or several bulk-import rows committed in a tight loop) would
+    # otherwise tie and sort in an unspecified order -- the auto-increment
+    # log_id is monotonically increasing and never ties, so it reliably
+    # breaks that tie newest-first (same fix already applied to
+    # modules/announcements.py's list_announcements_for_role()).
+    query += " ORDER BY timestamp DESC, log_id DESC LIMIT ?"
     params.append(limit)
 
     rows = fetch_all(query, tuple(params))

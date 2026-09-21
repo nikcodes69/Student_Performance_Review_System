@@ -367,3 +367,61 @@ def test_logout_writes_logout_audit_entry(test_db):
     events = _auth_events_for(user_id)
     assert len(events) == 1
     assert json.loads(events[0]["new_value"])["event"] == "logout"
+
+
+# ---------------------------------------------------------------------------
+# list_locked_accounts() / admin_unlock_account()
+# ---------------------------------------------------------------------------
+
+def test_list_locked_accounts_includes_a_locked_user(test_db):
+    auth.create_user("teacher17", "RightPass1!", config.ROLE_TEACHER)
+
+    for _ in range(config.MAX_FAILED_LOGIN_ATTEMPTS):
+        with pytest.raises(AuthenticationError):
+            auth.authenticate("teacher17", "WrongPassword!")
+
+    locked = auth.list_locked_accounts()
+    assert len(locked) == 1
+    assert locked[0]["username"] == "teacher17"
+
+
+def test_list_locked_accounts_excludes_accounts_never_locked(test_db):
+    auth.create_user("teacher18", "RightPass1!", config.ROLE_TEACHER)
+    assert auth.list_locked_accounts() == []
+
+
+def test_admin_unlock_account_clears_the_lock(test_db):
+    admin_id = auth.create_user("admin", "AdminPass1!", config.ROLE_ADMIN)
+    admin_user_dict = {"user_id": admin_id, "role": config.ROLE_ADMIN, "username": "admin"}
+    user_id = auth.create_user("teacher19", "RightPass1!", config.ROLE_TEACHER)
+
+    for _ in range(config.MAX_FAILED_LOGIN_ATTEMPTS):
+        with pytest.raises(AuthenticationError):
+            auth.authenticate("teacher19", "WrongPassword!")
+    assert len(auth.list_locked_accounts()) == 1
+
+    auth.admin_unlock_account(user_id, admin_user_dict)
+
+    assert auth.list_locked_accounts() == []
+    # The correct password now works immediately, no waiting for the timer.
+    user = auth.authenticate("teacher19", "RightPass1!")
+    assert user["username"] == "teacher19"
+
+
+def test_admin_unlock_account_rejects_a_not_locked_account(test_db):
+    admin_id = auth.create_user("admin", "AdminPass1!", config.ROLE_ADMIN)
+    admin_user_dict = {"user_id": admin_id, "role": config.ROLE_ADMIN, "username": "admin"}
+    user_id = auth.create_user("teacher20", "RightPass1!", config.ROLE_TEACHER)
+
+    with pytest.raises(ValidationError):
+        auth.admin_unlock_account(user_id, admin_user_dict)
+
+
+def test_admin_unlock_account_requires_admin_role(test_db):
+    teacher_id = auth.create_user("teacher21", "RightPass1!", config.ROLE_TEACHER)
+    other_id = auth.create_user("teacher22", "RightPass1!", config.ROLE_TEACHER)
+    non_admin_acting_user = {"user_id": teacher_id, "role": config.ROLE_TEACHER, "username": "teacher21"}
+
+    from utils.exceptions import AuthorizationError
+    with pytest.raises(AuthorizationError):
+        auth.admin_unlock_account(other_id, non_admin_acting_user)

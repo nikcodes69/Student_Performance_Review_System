@@ -1072,6 +1072,84 @@ def reactivate_user(user_id: int, acting_user: dict) -> None:
     logger.info("User '%s' (user_id=%s) reactivated by user_id=%s.", existing["username"], user_id, acting_user["user_id"])
 
 
+def list_locked_accounts() -> list[dict]:
+    """
+    Every account CURRENTLY locked out by the failed-login lockout (see
+    authenticate()'s "LOGIN LOCKOUT" section) -- i.e. locked_until is set
+    and still in the future.
+
+    is_locked, like authenticate()'s own lockout check, is computed by
+    the DATABASE comparing locked_until against its own CURRENT_TIMESTAMP,
+    not by comparing against Python's datetime.now() -- see authenticate()'s
+    comment on why mixing the two clocks (one UTC, one local) would be wrong.
+    A lock that has already expired naturally (the 15 minutes passed) does
+    NOT appear here -- it's already usable again even though the stale
+    locked_until value is still sitting in the row until the next login
+    attempt overwrites it.
+
+    Not permission-gated itself, consistent with every other list_*
+    function in this project -- render_user_management_page() below is
+    the real gate (require_role(ROLE_ADMIN)).
+
+    Returns:
+        A list of dicts: user_id, username, role, failed_login_attempts,
+        locked_until. Ordered by locked_until (soonest-to-expire first).
+    """
+    return fetch_all(
+        "SELECT user_id, username, role, failed_login_attempts, locked_until FROM users "
+        "WHERE locked_until IS NOT NULL AND locked_until > CURRENT_TIMESTAMP "
+        "ORDER BY locked_until"
+    )
+
+
+def admin_unlock_account(user_id: int, acting_user: dict) -> None:
+    """
+    Manually clear a failed-login lockout before it would otherwise
+    expire on its own (see authenticate()'s "LOGIN LOCKOUT" section) --
+    e.g. the account's real owner is confirmed to be who they say they
+    are and just needs back in immediately, rather than waiting out
+    config.LOGIN_LOCKOUT_MINUTES.
+
+    Args:
+        user_id: The account to unlock.
+        acting_user: The logged-in Admin performing this action.
+
+    Raises:
+        AuthorizationError: if acting_user's role is not Admin.
+        RecordNotFoundError: if user_id does not exist.
+        ValidationError: if the account is not currently locked.
+    """
+    from modules.audit import build_audit_entry
+    from database.db_manager import execute_transaction
+
+    check_permission(acting_user["role"], (config.ROLE_ADMIN,))
+
+    existing = fetch_one(
+        "SELECT user_id, username, "
+        "(locked_until IS NOT NULL AND locked_until > CURRENT_TIMESTAMP) AS is_locked "
+        "FROM users WHERE user_id = ?",
+        (user_id,),
+    )
+    if existing is None:
+        raise RecordNotFoundError(f"No user found with user_id {user_id}.")
+    if not existing["is_locked"]:
+        raise ValidationError(f"User '{existing['username']}' is not currently locked.")
+
+    update_statement = (
+        "UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE user_id = ?",
+        (user_id,),
+    )
+    audit_statement = build_audit_entry(
+        acting_user["user_id"], config.AUDIT_UPDATE, "auth_events", str(user_id),
+        old_value={"locked": True}, new_value={"locked": False, "unlocked_by_admin": True},
+    )
+    execute_transaction([update_statement, audit_statement])
+    logger.info(
+        "User '%s' (user_id=%s) manually unlocked by user_id=%s.",
+        existing["username"], user_id, acting_user["user_id"],
+    )
+
+
 def change_password(user_id: int, old_password: str, new_password: str) -> None:
     """
     Self-service password change: a logged-in user replaces their OWN
@@ -1722,6 +1800,32 @@ def render_user_management_page() -> None:
                 st.error(str(error))
 
     st.divider()
+    st.subheader("Locked accounts")
+    st.caption(
+        f"Accounts temporarily locked after {config.MAX_FAILED_LOGIN_ATTEMPTS} failed login "
+        f"attempts (see modules/auth.py's authenticate()). Locks clear themselves after "
+        f"{config.LOGIN_LOCKOUT_MINUTES} minutes -- unlock one manually here if you've "
+        "confirmed the real owner needs back in sooner."
+    )
+    locked_accounts = list_locked_accounts()
+    if not locked_accounts:
+        st.caption("No accounts are currently locked.")
+    else:
+        for entry in locked_accounts:
+            lock_col, button_col = st.columns([4, 1])
+            with lock_col:
+                st.write(
+                    f"**{entry['username']}** ({entry['role']}) -- "
+                    f"{entry['failed_login_attempts']} failed attempts, "
+                    f"locked until {entry['locked_until']}"
+                )
+            with button_col:
+                if st.button("Unlock", key=f"unlock_{entry['user_id']}"):
+                    admin_unlock_account(entry["user_id"], current_user)
+                    st.toast(f"'{entry['username']}' unlocked.", icon=":material/lock_open:")
+                    st.rerun()
+
+    st.divider()
     st.subheader("Existing accounts")
 
     users = list_users()
@@ -1741,6 +1845,32 @@ def render_user_management_page() -> None:
         for u in users
     ]
     render_data_table(display_rows, key_prefix="users_table", filename_prefix="users")
+
+    st.subheader("Login history")
+    st.caption(
+        "Every login success, login failure, and logout recorded for one account "
+        "(see modules/auth.py's _record_auth_audit_event())."
+    )
+    history_username_choice = st.selectbox(
+        "Select an account", options=[u["username"] for u in users], key="login_history_user_choice",
+    )
+    history_user = next(u for u in users if u["username"] == history_username_choice)
+
+    from modules.audit import get_audit_logs  # see deactivate_user()'s docstring for why this is a lazy import
+
+    login_events = get_audit_logs(table_name="auth_events", user_id=history_user["user_id"])
+    if not login_events:
+        st.caption("No login activity recorded yet.")
+    else:
+        history_display_rows = [
+            {
+                "Timestamp": entry["timestamp"],
+                "Event": entry["new_value"].get("event") if entry["new_value"] else None,
+                "Reason": entry["new_value"].get("reason", "") if entry["new_value"] else "",
+            }
+            for entry in login_events
+        ]
+        render_data_table(history_display_rows, key_prefix="login_history_table", filename_prefix="login_history")
 
     st.subheader("Deactivate / reactivate an account")
     username_choice = st.selectbox("Select an account", options=[u["username"] for u in users])
