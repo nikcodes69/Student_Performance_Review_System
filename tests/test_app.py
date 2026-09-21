@@ -114,7 +114,7 @@ def _sidebar_page_labels(at: AppTest) -> list[str]:
 _ADMIN_ONLY_PAGES = {"Audit Log", "User Management"}
 _STUDENT_ONLY_PAGES = {"My Performance"}
 _STAFF_PAGES = {  # Admin and Teacher both
-    "Dashboard", "Students", "Subjects", "Marks Entry", "Attendance", "Assignments",
+    "Dashboard", "Search", "Students", "Subjects", "Marks Entry", "Attendance", "Assignments",
     "Analytics", "At-Risk Prediction", "Final Marks Prediction", "Student Segmentation",
     "Model Comparison", "Report Card", "Class Report",
 }
