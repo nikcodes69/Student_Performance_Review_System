@@ -43,7 +43,7 @@ from modules.ml_predictions import (
 )
 from utils.exceptions import ModelNotFoundError, ValidationError
 from utils.logger import get_logger
-from utils.pdf_generator import generate_report_card
+from utils.pdf_generator import generate_report_card, generate_transcript
 
 logger = get_logger(__name__)
 
@@ -173,10 +173,23 @@ def render_student_portal_page() -> None:
     st.divider()
     st.subheader("Report Card")
     if st.button("Generate My Report Card"):
-        pdf_bytes = generate_report_card(roll_no, semester_value)
+        # published_only=True: a draft mark a student can't even see
+        # on-screen must not leak into a PDF they can download instead.
+        pdf_bytes = generate_report_card(roll_no, semester_value, published_only=True)
         st.download_button(
             "Download PDF",
             data=pdf_bytes,
             file_name=f"{roll_no}_semester{semester_value}_report_card.pdf",
+            mime="application/pdf",
+        )
+
+    st.subheader("Full Transcript")
+    st.caption("Every semester you have marks recorded for, ending with your cumulative CGPA.")
+    if st.button("Generate My Transcript"):
+        transcript_bytes = generate_transcript(roll_no, published_only=True)
+        st.download_button(
+            "Download Transcript PDF",
+            data=transcript_bytes,
+            file_name=f"{roll_no}_transcript.pdf",
             mime="application/pdf",
         )

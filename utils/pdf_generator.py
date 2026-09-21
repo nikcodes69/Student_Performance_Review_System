@@ -36,8 +36,9 @@ from reportlab.lib.units import cm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 import config
-from modules import auth, students
+from modules import auth, students, subjects
 from modules.attendance import list_attendance_for_student
+from modules.grades import calculate_cgpa
 from modules.marks import compute_sgpa_for_marks, list_marks_for_student
 from utils.exceptions import ModelNotFoundError, ValidationError
 from utils.logger import get_logger
@@ -212,7 +213,7 @@ def _build_ml_predictions_section(roll_no: str, semester: int, styles) -> list:
     return elements
 
 
-def generate_report_card(roll_no: str, semester: int) -> bytes:
+def generate_report_card(roll_no: str, semester: int, published_only: bool = False) -> bytes:
     """
     Build a complete PDF report card for one student's semester, always
     including the ML predictions section (every feature it needs,
@@ -222,6 +223,13 @@ def generate_report_card(roll_no: str, semester: int) -> bytes:
     Args:
         roll_no: The student.
         semester: Which semester to report on.
+        published_only: If True, only PUBLISHED marks are included (see
+            modules/marks.py's publish_marks()) -- modules/student_portal.py
+            passes True for a Student downloading their OWN report card,
+            so a draft mark they can't even see on-screen doesn't leak
+            into a PDF they can download instead. Staff's own
+            render_report_card_page() leaves this False -- an Admin/
+            Teacher reviewing a report card needs to see drafts too.
 
     Returns:
         The finished PDF as raw bytes, ready for st.download_button() --
@@ -231,7 +239,7 @@ def generate_report_card(roll_no: str, semester: int) -> bytes:
         RecordNotFoundError: if roll_no does not exist.
     """
     student = students.get_student(roll_no)
-    subject_marks = list_marks_for_student(roll_no, semester=semester)
+    subject_marks = list_marks_for_student(roll_no, semester=semester, published_only=published_only)
     subject_attendance = list_attendance_for_student(roll_no, semester=semester)
     sgpa = compute_sgpa_for_marks(subject_marks)
 
@@ -260,6 +268,107 @@ def generate_report_card(roll_no: str, semester: int) -> bytes:
 
     doc.build(story)
     logger.info("Report card generated for %s (semester %s).", roll_no, semester)
+    return buffer.getvalue()
+
+
+def _build_transcript_header_section(student: dict, styles) -> list:
+    """Student details for a transcript -- admission year instead of a
+    single semester, since a transcript (unlike a per-semester report
+    card) spans every semester on record at once."""
+    data = [
+        ["Roll No.", student["roll_no"], "Name", student["name"]],
+        ["Branch", student["branch"], "Admission Year", str(student["admission_year"])],
+        ["Email", student["email"], "Phone", student["phone"]],
+    ]
+    table = Table(data, colWidths=[2.5 * cm, 5 * cm, 2.5 * cm, 5 * cm])
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+        ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+        ("BACKGROUND", (2, 0), (2, -1), colors.whitesmoke),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    return [Paragraph("Student Information", styles["Heading3"]), table]
+
+
+def generate_transcript(roll_no: str, published_only: bool = False) -> bytes:
+    """
+    Build a complete PDF transcript for one student -- EVERY semester
+    they have marks recorded for, one after another, ending with the
+    cumulative CGPA -- as opposed to generate_report_card()'s single
+    semester.
+
+    HOW CGPA IS COMPUTED: modules.grades.calculate_cgpa() needs a
+    {"sgpa": ..., "credits": ...} pair per completed semester, where
+    "credits" is the total credits of the subjects actually taken that
+    semester (not every subject that exists) -- built here by summing
+    subjects.credits for exactly the subject_codes appearing in that
+    semester's marks, using ONE subjects.list_subjects() call up front
+    (include_inactive=True, so a transcript still shows correctly for a
+    subject that has since been retired) rather than a database query
+    per semester.
+
+    Args:
+        roll_no: The student.
+        published_only: If True, only PUBLISHED marks count towards each
+            semester's entries and CGPA (see modules/marks.py's
+            publish_marks()) -- modules/student_portal.py passes True for
+            a Student downloading their OWN transcript, same reasoning as
+            generate_report_card()'s published_only. Staff's own
+            render_report_card_page() leaves this False.
+
+    Returns:
+        The finished PDF as raw bytes, ready for st.download_button().
+
+    Raises:
+        RecordNotFoundError: if roll_no does not exist.
+    """
+    student = students.get_student(roll_no)
+    credits_by_code = {s["subject_code"]: s["credits"] for s in subjects.list_subjects(include_inactive=True)}
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=2 * cm, bottomMargin=2 * cm)
+    styles = getSampleStyleSheet()
+
+    story = [
+        Paragraph("Student Performance Review &amp; Prediction System", styles["Title"]),
+        Paragraph("Official Academic Transcript", styles["Heading2"]),
+        Spacer(1, 0.5 * cm),
+    ]
+    story.extend(_build_transcript_header_section(student, styles))
+    story.append(Spacer(1, 0.5 * cm))
+
+    semester_results = []
+    any_marks_at_all = False
+    for semester in range(config.MIN_SEMESTER, config.MAX_SEMESTER + 1):
+        semester_marks = list_marks_for_student(roll_no, semester=semester, published_only=published_only)
+        if not semester_marks:
+            continue
+        any_marks_at_all = True
+
+        sgpa = compute_sgpa_for_marks(semester_marks)
+        if sgpa is not None:
+            semester_credits = sum(credits_by_code.get(row["subject_code"], 0) for row in semester_marks)
+            semester_results.append({"sgpa": sgpa, "credits": semester_credits})
+
+        story.append(Paragraph(f"Semester {semester}", styles["Heading3"]))
+        story.extend(_build_marks_section(semester_marks, sgpa, styles))
+        story.append(Spacer(1, 0.4 * cm))
+
+    if not any_marks_at_all:
+        story.append(Paragraph("No marks recorded for this student yet.", styles["Normal"]))
+    elif semester_results:
+        cgpa = calculate_cgpa(semester_results)
+        story.append(Paragraph(f"<b>Cumulative CGPA: {cgpa}</b>", styles["Heading3"]))
+
+    story.append(Spacer(1, 1 * cm))
+    story.append(Paragraph(
+        f"Generated on {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"],
+    ))
+
+    doc.build(story)
+    logger.info("Transcript generated for %s.", roll_no)
     return buffer.getvalue()
 
 
@@ -518,11 +627,31 @@ def render_report_card_page() -> None:
     )
 
     if st.button("Generate Report Card"):
-        pdf_bytes = generate_report_card(picked_student["roll_no"], int(semester))
+        # published_only=False: staff reviewing a report card needs to see
+        # drafts too, unlike a student downloading their own (see
+        # generate_report_card()'s docstring).
+        pdf_bytes = generate_report_card(picked_student["roll_no"], int(semester), published_only=False)
         st.success("Report card generated.")
         st.download_button(
             "Download PDF",
             data=pdf_bytes,
             file_name=f"{picked_student['roll_no']}_semester{int(semester)}_report_card.pdf",
+            mime="application/pdf",
+        )
+
+    st.divider()
+    st.subheader("Full Transcript")
+    st.caption(
+        f"Every semester {picked_student['roll_no']} has marks recorded for, one after "
+        "another, ending with the cumulative CGPA -- as opposed to the single-semester "
+        "report card above."
+    )
+    if st.button("Generate Transcript"):
+        transcript_bytes = generate_transcript(picked_student["roll_no"], published_only=False)
+        st.success("Transcript generated.")
+        st.download_button(
+            "Download Transcript PDF",
+            data=transcript_bytes,
+            file_name=f"{picked_student['roll_no']}_transcript.pdf",
             mime="application/pdf",
         )
