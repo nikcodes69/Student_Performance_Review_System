@@ -761,3 +761,32 @@ def validate_appeal_response(response: str) -> str:
         )
 
     return response
+
+
+# ---------------------------------------------------------------------------
+# TEACHER REMARK FIELDS (used by modules/teacher_remarks.py)
+# ---------------------------------------------------------------------------
+
+def validate_remark_text(remark: str) -> str:
+    """
+    Validate a Teacher/Admin's remark left on a student's record.
+
+    Rules: required, at most config.TEACHER_REMARK_MAX_LENGTH characters.
+
+    Args:
+        remark: The raw remark text.
+
+    Returns:
+        The remark with whitespace stripped.
+
+    Raises:
+        ValidationError: if remark is missing or too long.
+    """
+    remark = _require_non_empty(remark, "Remark")
+
+    if len(remark) > config.TEACHER_REMARK_MAX_LENGTH:
+        raise ValidationError(
+            f"Remark cannot exceed {config.TEACHER_REMARK_MAX_LENGTH} characters."
+        )
+
+    return remark

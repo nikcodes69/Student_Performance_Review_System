@@ -45,6 +45,7 @@ import config
 from modules import (
     analytics, announcements, assignments, attendance, audit, auth,
     grade_appeals, ml_predictions, marks, search, student_portal, students, subjects,
+    teacher_remarks,
 )
 from utils.pdf_generator import render_class_report_page, render_report_card_page
 from utils.exceptions import (
@@ -84,6 +85,7 @@ HOME_SECTIONS = [
     ("My Performance", ":material/person:", (config.ROLE_STUDENT,), "Your own marks, attendance, and predictions"),
     ("Announcements", ":material/campaign:", config.VALID_ROLES, "Notices from Admin and Teachers"),
     ("Grade Appeals", ":material/gavel:", config.VALID_ROLES, "Dispute or review a published result"),
+    ("Student Remarks", ":material/rate_review:", (config.ROLE_ADMIN, config.ROLE_TEACHER), "Leave notes on a student's record"),
     ("Change Password", ":material/password:", config.VALID_ROLES, "Update your own login password"),
 ]
 
@@ -154,6 +156,7 @@ PAGES = {
     "My Performance": ((config.ROLE_STUDENT,), student_portal.render_student_portal_page),
     "Announcements": (config.VALID_ROLES, announcements.render_announcements_page),
     "Grade Appeals": (config.VALID_ROLES, grade_appeals.render_grade_appeals_page),
+    "Student Remarks": ((config.ROLE_ADMIN, config.ROLE_TEACHER), teacher_remarks.render_remarks_page),
     "Change Password": (config.VALID_ROLES, auth.render_change_password_page),
 }
 

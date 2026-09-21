@@ -41,6 +41,7 @@ from modules.ml_predictions import (
     predict_final_marks_for_student,
     predict_segment_for_student,
 )
+from modules.teacher_remarks import list_remarks_for_student
 from utils.exceptions import ModelNotFoundError, ValidationError
 from utils.logger import get_logger
 from utils.pdf_generator import generate_report_card, generate_transcript
@@ -111,6 +112,19 @@ def render_student_portal_page() -> None:
             for row in attendance_rows
         ]
         st.dataframe(display_rows, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Teacher Remarks")
+    remarks = list_remarks_for_student(roll_no)
+    if not remarks:
+        st.info("No remarks on your record yet.")
+    else:
+        for entry in remarks:
+            subject_label = entry["subject_name"] or "General"
+            with st.container(border=True):
+                st.markdown(f"**{subject_label}**")
+                st.caption(f"By {entry['teacher_username']} on {entry['created_at']}")
+                st.write(entry["remark"])
 
     st.divider()
     st.subheader("My Rank")

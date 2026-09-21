@@ -132,6 +132,8 @@ ANNOUNCEMENT_MESSAGE_MAX_LENGTH = 2000
 APPEAL_REASON_MAX_LENGTH = 1000
 APPEAL_RESPONSE_MAX_LENGTH = 1000
 
+TEACHER_REMARK_MAX_LENGTH = 500
+
 # A 10-digit local mobile number. Kept as a length constant rather than
 # hard-coded "10" inside validators.py.
 PHONE_LENGTH = 10
@@ -296,7 +298,7 @@ AUDIT_ACTIONS = (AUDIT_INSERT, AUDIT_UPDATE, AUDIT_SOFT_DELETE)
 AUDITED_TABLES = (
     "students", "subjects", "marks", "attendance", "semesters", "users",
     "assignments", "teacher_subjects", "pending_accounts", "auth_events",
-    "announcements", "grade_appeals",
+    "announcements", "grade_appeals", "teacher_remarks",
 )
 
 # ---------------------------------------------------------------------------

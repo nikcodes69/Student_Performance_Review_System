@@ -116,7 +116,7 @@ _STUDENT_ONLY_PAGES = {"My Performance"}
 _STAFF_PAGES = {  # Admin and Teacher both
     "Dashboard", "Search", "Students", "Subjects", "Marks Entry", "Attendance", "Assignments",
     "Analytics", "At-Risk Prediction", "Final Marks Prediction", "Student Segmentation",
-    "Model Comparison", "Report Card", "Class Report",
+    "Model Comparison", "Report Card", "Class Report", "Student Remarks",
 }
 _SHARED_PAGES = {"Home", "Announcements", "Grade Appeals", "Change Password"}  # every role
 

@@ -493,6 +493,34 @@ def create_tables(conn) -> None:
         """)
 
         # ---------------------------------------------------------------
+        # teacher_remarks
+        # ---------------------------------------------------------------
+        # A short note a Teacher (or Admin) leaves on a student's record,
+        # visible to that student on their own portal -- e.g. "Improve
+        # punctuality" or "Great improvement this semester". subject_code
+        # is NULLABLE, same pattern as announcements.target_role: a
+        # remark tied to one subject (e.g. about a specific exam) sets
+        # it; a general remark about the student overall leaves it NULL.
+        # is_active is the same soft-delete pattern used by
+        # students/subjects/announcements -- retracting a remark keeps
+        # its row (and audit trail) rather than a real DELETE.
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS teacher_remarks (
+                remark_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                roll_no      TEXT NOT NULL,
+                subject_code TEXT,
+                teacher_id   INTEGER NOT NULL,
+                remark       TEXT NOT NULL,
+                is_active    INTEGER NOT NULL DEFAULT 1
+                                 CHECK (is_active IN (0, 1)),
+                created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (roll_no) REFERENCES students (roll_no),
+                FOREIGN KEY (subject_code) REFERENCES subjects (subject_code),
+                FOREIGN KEY (teacher_id) REFERENCES users (user_id)
+            )
+        """)
+
+        # ---------------------------------------------------------------
         # semesters
         # ---------------------------------------------------------------
         # This table has no single-column primary key -- (roll_no,
@@ -614,6 +642,7 @@ def create_indexes(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_grade_appeals_roll_no ON grade_appeals (roll_no)",
         "CREATE INDEX IF NOT EXISTS idx_grade_appeals_subject_code ON grade_appeals (subject_code)",
         "CREATE INDEX IF NOT EXISTS idx_grade_appeals_status ON grade_appeals (status)",
+        "CREATE INDEX IF NOT EXISTS idx_teacher_remarks_roll_no ON teacher_remarks (roll_no)",
     ]
 
     try:
