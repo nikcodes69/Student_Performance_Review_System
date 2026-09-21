@@ -2,8 +2,9 @@
 modules/audit.py
 =================
 Records and displays the audit trail: a permanent history of who changed
-what, and when, across the tables listed in config.AUDITED_TABLES
-(students, subjects, marks, attendance, semesters, users).
+what, and when, across the tables listed in config.AUDITED_TABLES --
+including "auth_events" (login/logout/failed-login attempts, written by
+modules/auth.py's _record_auth_audit_event(), not by this file).
 
 HOW FUTURE MODULES WILL USE THIS (starting with modules/students.py,
 marks.py, etc. in step 8): whenever one of those modules inserts, updates,
@@ -215,7 +216,11 @@ def render_audit_log_page() -> None:
     auth.require_role(config.ROLE_ADMIN)
 
     st.title("Audit Log")
-    st.write("A permanent record of every change made to academic records in this system.")
+    st.write(
+        "A permanent record of every change made to academic records in this system, "
+        "plus every login, logout, and failed login attempt (filter by table "
+        "\"auth_events\" for just those)."
+    )
 
     filter_col1, filter_col2 = st.columns(2)
     with filter_col1:

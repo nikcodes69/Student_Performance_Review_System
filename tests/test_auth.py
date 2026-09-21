@@ -239,3 +239,131 @@ def test_admin_reset_password_requires_admin_role(test_db):
     non_admin_acting_user = {"user_id": target_id, "username": "teacher9", "role": config.ROLE_TEACHER}
     with pytest.raises(AuthorizationError):
         auth.admin_reset_password(target_id, "ResetPass3#", non_admin_acting_user)
+
+
+# ---------------------------------------------------------------------------
+# authenticate() -- failed-login lockout (config.MAX_FAILED_LOGIN_ATTEMPTS/
+# LOGIN_LOCKOUT_MINUTES)
+# ---------------------------------------------------------------------------
+
+def test_authenticate_locks_account_after_max_failed_attempts(test_db):
+    from database.db_manager import fetch_one
+    user_id = auth.create_user("teacher11", "RightPass1!", config.ROLE_TEACHER)
+
+    for _ in range(config.MAX_FAILED_LOGIN_ATTEMPTS):
+        with pytest.raises(AuthenticationError):
+            auth.authenticate("teacher11", "WrongPassword!")
+
+    row = fetch_one(
+        "SELECT failed_login_attempts, locked_until FROM users WHERE user_id = ?", (user_id,),
+    )
+    assert row["failed_login_attempts"] == config.MAX_FAILED_LOGIN_ATTEMPTS
+    assert row["locked_until"] is not None
+
+    # Even the CORRECT password is now rejected while locked -- that's the
+    # entire point of a lockout (otherwise it wouldn't stop a fast guesser).
+    with pytest.raises(AuthenticationError):
+        auth.authenticate("teacher11", "RightPass1!")
+
+
+def test_authenticate_does_not_lock_out_an_unknown_username(test_db):
+    # No account row exists for "ghost" at all -- there's nothing to
+    # increment or lock, and repeating the attempt must never raise
+    # anything other than the same generic error every single time.
+    for _ in range(config.MAX_FAILED_LOGIN_ATTEMPTS + 2):
+        with pytest.raises(AuthenticationError):
+            auth.authenticate("ghost", "WhateverPassword1!")
+
+
+def test_authenticate_resets_failed_attempts_on_success(test_db):
+    from database.db_manager import fetch_one
+    user_id = auth.create_user("teacher12", "RightPass1!", config.ROLE_TEACHER)
+
+    for _ in range(config.MAX_FAILED_LOGIN_ATTEMPTS - 1):  # one short of locking
+        with pytest.raises(AuthenticationError):
+            auth.authenticate("teacher12", "WrongPassword!")
+
+    auth.authenticate("teacher12", "RightPass1!")  # correct password, succeeds
+
+    row = fetch_one(
+        "SELECT failed_login_attempts, locked_until FROM users WHERE user_id = ?", (user_id,),
+    )
+    assert row["failed_login_attempts"] == 0
+    assert row["locked_until"] is None
+
+
+def test_authenticate_wrong_password_below_threshold_still_succeeds_after(test_db):
+    # A FEW wrong attempts (not enough to lock) must not permanently block
+    # the account -- the very next correct attempt still works.
+    auth.create_user("teacher13", "RightPass1!", config.ROLE_TEACHER)
+
+    with pytest.raises(AuthenticationError):
+        auth.authenticate("teacher13", "WrongPassword!")
+
+    user = auth.authenticate("teacher13", "RightPass1!")
+    assert user["username"] == "teacher13"
+
+
+# ---------------------------------------------------------------------------
+# Login/logout audit trail (table_name="auth_events" -- see
+# modules/auth.py's _record_auth_audit_event() for why this reuses
+# AUDIT_UPDATE rather than adding new AUDIT_ACTIONS values)
+# ---------------------------------------------------------------------------
+
+def _auth_events_for(user_id: int) -> list[dict]:
+    from database.db_manager import fetch_all
+    rows = fetch_all(
+        "SELECT * FROM audit_log WHERE table_name = 'auth_events' AND user_id = ? ORDER BY log_id",
+        (user_id,),
+    )
+    return [dict(row) for row in rows]
+
+
+def test_authenticate_success_writes_login_success_audit_entry(test_db):
+    import json
+    user_id = auth.create_user("teacher14", "RightPass1!", config.ROLE_TEACHER)
+    auth.authenticate("teacher14", "RightPass1!")
+
+    events = _auth_events_for(user_id)
+    assert len(events) == 1
+    assert json.loads(events[0]["new_value"])["event"] == "login_success"
+
+
+def test_authenticate_failure_writes_login_failed_audit_entry(test_db):
+    import json
+    user_id = auth.create_user("teacher15", "RightPass1!", config.ROLE_TEACHER)
+    with pytest.raises(AuthenticationError):
+        auth.authenticate("teacher15", "WrongPassword!")
+
+    events = _auth_events_for(user_id)
+    assert len(events) == 1
+    payload = json.loads(events[0]["new_value"])
+    assert payload["event"] == "login_failed"
+    assert payload["reason"] == "wrong_password"
+
+
+def test_unknown_username_writes_no_audit_entry(test_db):
+    # No user_id exists to attribute this to -- audit_log.user_id is
+    # NOT NULL with a foreign key to users.user_id, so there is nothing
+    # to write. Confirmed by checking the table is empty afterward, not
+    # just that no exception was raised.
+    from database.db_manager import fetch_all
+    with pytest.raises(AuthenticationError):
+        auth.authenticate("totally_unknown", "whatever")
+
+    assert fetch_all("SELECT * FROM audit_log WHERE table_name = 'auth_events'") == []
+
+
+def test_logout_writes_logout_audit_entry(test_db):
+    import json
+    import streamlit as st
+    user_id = auth.create_user("teacher16", "RightPass1!", config.ROLE_TEACHER)
+    st.session_state[auth.SESSION_KEY_USER] = {
+        "user_id": user_id, "username": "teacher16", "role": config.ROLE_TEACHER,
+    }
+
+    auth.logout()
+
+    events = _auth_events_for(user_id)
+    assert len(events) == 1
+    assert json.loads(events[0]["new_value"])["event"] == "logout"

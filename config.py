@@ -73,6 +73,17 @@ BCRYPT_ROUNDS = 12
 # lab PC from being used by someone else under a logged-in session.
 SESSION_TIMEOUT_MINUTES = 30
 
+# Failed-login lockout (username/password only -- Google Sign-In proves
+# identity cryptographically, so a "guessing" lockout doesn't apply to
+# it). After MAX_FAILED_LOGIN_ATTEMPTS consecutive wrong passwords for
+# the SAME real account, that account is locked for LOGIN_LOCKOUT_MINUTES
+# -- protects against a brute-force password guess against one specific,
+# known account (see modules/auth.py's authenticate()). Does not apply
+# to, and is never incremented by, a username that doesn't exist at all
+# -- there's no account row to lock.
+MAX_FAILED_LOGIN_ATTEMPTS = 5
+LOGIN_LOCKOUT_MINUTES = 15
+
 # The three roles this system supports. Defined as constants (not raw
 # strings scattered through the code) so a typo like "admn" becomes an
 # obvious NameError instead of a silent bug.
@@ -258,9 +269,18 @@ AUDIT_ACTIONS = (AUDIT_INSERT, AUDIT_UPDATE, AUDIT_SOFT_DELETE)
 # them explicitly (rather than accepting any string) catches a typo like
 # "student" instead of "students" at validation time, before it becomes a
 # confusing, silently-wrong row in audit_log.
+#
+# "auth_events" is not a real database table -- it's the table_name used
+# for login/logout/failed-login audit entries (see modules/auth.py's
+# _record_auth_audit_event()), kept as its own filterable category
+# rather than lumped under "users" so the Audit Log page can show "every
+# login attempt" separately from "every profile edit". Recorded as a
+# plain AUDIT_UPDATE (see that function's docstring for why it doesn't
+# get its own AUDIT_ACTIONS entry -- the same live-table CHECK-constraint
+# risk documented above for SOFT_DELETE/DELETE applies here too).
 AUDITED_TABLES = (
     "students", "subjects", "marks", "attendance", "semesters", "users",
-    "assignments", "teacher_subjects", "pending_accounts",
+    "assignments", "teacher_subjects", "pending_accounts", "auth_events",
 )
 
 # ---------------------------------------------------------------------------

@@ -77,7 +77,14 @@ def test_db(tmp_path, monkeypatch):
 def _run_as(role: str, username: str) -> AppTest:
     """Simulate a logged-in session for `role` and run app.py, the same
     way a real browser hitting a freshly-logged-in page would."""
-    at = AppTest.from_file(str(_APP_PATH))
+    # default_timeout=3 (AppTest's own default) was intermittently too
+    # tight for this specific page -- it renders block_password_clipboard()'s
+    # JS component on every run, and the Home page's dashboard summary
+    # query, which together occasionally push a cold run past 3 seconds
+    # under load, failing with a timeout that has nothing to do with the
+    # app itself being broken. 15s gives real headroom without letting a
+    # genuinely hung script run for a long time undetected.
+    at = AppTest.from_file(str(_APP_PATH), default_timeout=15)
     at.session_state["auth_user"] = {
         "user_id": 1, "username": username, "role": role, "must_change_password": False,
     }

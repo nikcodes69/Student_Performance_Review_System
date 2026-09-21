@@ -186,7 +186,9 @@ def create_tables(conn) -> None:
                 google_email  TEXT,
                 created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                last_login    TEXT
+                last_login    TEXT,
+                failed_login_attempts INTEGER NOT NULL DEFAULT 0,
+                locked_until  TEXT
             )
         """)
 
@@ -562,8 +564,10 @@ def migrate_schema(conn) -> None:
     """
     Apply schema changes needed on a database that was created BEFORE a
     given column existed -- currently users.must_change_password (see
-    modules/auth.py's forced-password-change feature) and
-    users.google_email (see modules/auth.py's Google Sign-In support).
+    modules/auth.py's forced-password-change feature), users.google_email
+    (see modules/auth.py's Google Sign-In support), and
+    users.failed_login_attempts/locked_until (see modules/auth.py's
+    failed-login lockout).
 
     WHY THIS FUNCTION EXISTS, SEPARATE FROM create_tables(): every
     CREATE TABLE statement above uses "IF NOT EXISTS", which is a no-op
@@ -624,6 +628,18 @@ def migrate_schema(conn) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_email ON users (google_email)"
         )
         conn.commit()
+
+        if "failed_login_attempts" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.commit()
+            logger.info("Migrated users table: added failed_login_attempts column.")
+
+        if "locked_until" not in existing_columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN locked_until TEXT")
+            conn.commit()
+            logger.info("Migrated users table: added locked_until column.")
 
         # subjects/marks predating the fixed 25/50/25 marks breakdown --
         # see _rebuild_subjects_and_marks_tables() for why this needs a

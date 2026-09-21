@@ -93,6 +93,7 @@ request, to this instead:
     authenticate_with_google()'s expected_role parameter).
 """
 
+import json
 import re
 import secrets
 from datetime import datetime, timedelta
@@ -529,6 +530,55 @@ def signup_invited_account(email: str, username: str, password: str) -> int:
     return user_id
 
 
+def _record_auth_audit_event(user_id: int, event: str, reason: str | None = None) -> None:
+    """
+    Write one audit_log entry for a login/logout event -- LOGIN_SUCCESS,
+    LOGIN_FAILED, or LOGOUT (see authenticate()/authenticate_with_google()/
+    logout() below).
+
+    WHY THIS DUPLICATES A SLICE OF modules/audit.py's build_audit_entry()
+    INSTEAD OF CALLING IT: modules/audit.py already imports FROM this
+    module (auth.require_role(), for render_audit_log_page()'s own access
+    control), so this module importing back from audit.py would be a
+    circular import. The INSERT itself is one line; duplicating that one
+    line is a smaller cost than restructuring which module owns what.
+
+    WHY table_name="auth_events" INSTEAD OF A NEW AUDIT_ACTIONS VALUE:
+    audit_log.action has a CHECK (action IN (...)) constraint fixed at
+    table-creation time -- adding a new allowed value means rebuilding
+    the table (SQLite/libsql cannot ALTER a CHECK constraint in place),
+    which is a real risk against a live table already holding real
+    historical audit data (see config.py's AUDIT_ACTIONS comment for the
+    identical reasoning already applied to SOFT_DELETE vs a real DELETE
+    action). Reusing the existing AUDIT_UPDATE action and putting the
+    actual event name in new_value avoids that risk entirely, at the cost
+    of "UPDATE" being a slightly imprecise label for a login attempt --
+    table_name="auth_events" is what actually distinguishes these entries
+    in the Audit Log page's filter, not the action column.
+
+    Args:
+        user_id: Whose account this event is about. Always a REAL,
+            already-existing user_id -- there is deliberately no way to
+            audit-log a failed login for a username that doesn't exist at
+            all (audit_log.user_id is NOT NULL with a FOREIGN KEY to
+            users.user_id; there is no row to reference). That specific
+            case is still recorded in logs/app.log via logger.warning()
+            (see authenticate()), just not in the structured audit trail.
+        event: "login_success", "login_failed", or "logout".
+        reason: Optional extra context for a LOGIN_FAILED event (e.g.
+            "wrong_password", "locked", "deactivated").
+    """
+    new_value = {"event": event}
+    if reason is not None:
+        new_value["reason"] = reason
+
+    execute_write(
+        "INSERT INTO audit_log (user_id, action, table_name, record_id, old_value, new_value) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (user_id, config.AUDIT_UPDATE, "auth_events", str(user_id), None, json.dumps(new_value)),
+    )
+
+
 def authenticate(username: str, password: str, expected_role: str | None = None) -> dict:
     """
     Verify a username/password pair and return the matching user's
@@ -587,16 +637,27 @@ def authenticate(username: str, password: str, expected_role: str | None = None)
             expected_role was given) doesn't exist, the account is
             deactivated, or the password is wrong.
     """
+    # is_locked is computed by the DATABASE itself (locked_until compared
+    # against the database's own CURRENT_TIMESTAMP in the same query),
+    # not by comparing against Python's datetime.now() -- CURRENT_TIMESTAMP
+    # is UTC while datetime.now() is this machine's local time, and mixing
+    # the two would make the lock expire at the wrong wall-clock moment.
+    # See _record_auth_audit_event() for why locked_until itself is also
+    # SET using a database-side expression (LOGIN LOCKOUT below), for the
+    # same reason.
+    select_columns = (
+        "user_id, username, password_hash, role, is_active, must_change_password, "
+        "failed_login_attempts, "
+        "(locked_until IS NOT NULL AND locked_until > CURRENT_TIMESTAMP) AS is_locked"
+    )
     if expected_role is not None:
         user_row = fetch_one(
-            "SELECT user_id, username, password_hash, role, is_active, must_change_password "
-            "FROM users WHERE username = ? AND role = ?",
+            f"SELECT {select_columns} FROM users WHERE username = ? AND role = ?",
             (username, expected_role),
         )
     else:
         user_row = fetch_one(
-            "SELECT user_id, username, password_hash, role, is_active, must_change_password "
-            "FROM users WHERE username = ?",
+            f"SELECT {select_columns} FROM users WHERE username = ?",
             (username,),
         )
 
@@ -612,14 +673,53 @@ def authenticate(username: str, password: str, expected_role: str | None = None)
         logger.warning("Login failed: account '%s' is deactivated.", username)
         raise AuthenticationError("This account has been deactivated. Contact an administrator.")
 
+    if user_row["is_locked"]:
+        logger.warning("Login failed: account '%s' is temporarily locked.", username)
+        _record_auth_audit_event(user_row["user_id"], "login_failed", reason="locked")
+        raise AuthenticationError(
+            "This account is temporarily locked after too many failed login attempts. "
+            "Try again in a few minutes, or contact an administrator."
+        )
+
     if not verify_password(password, user_row["password_hash"]):
-        logger.warning("Login failed: wrong password for username '%s'.", username)
+        # LOGIN LOCKOUT: count this attempt, and lock the account (via a
+        # database-side "+N minutes" expression -- see the comment above)
+        # once it reaches config.MAX_FAILED_LOGIN_ATTEMPTS. Only reachable
+        # here, for a REAL account with the RIGHT role -- an unknown
+        # username or a wrong-role guess (user_row is None, above) never
+        # increments anything, because there is no real account to lock.
+        new_attempts = user_row["failed_login_attempts"] + 1
+        just_got_locked = new_attempts >= config.MAX_FAILED_LOGIN_ATTEMPTS
+        if just_got_locked:
+            execute_write(
+                "UPDATE users SET failed_login_attempts = ?, "
+                f"locked_until = datetime('now', '+{config.LOGIN_LOCKOUT_MINUTES} minutes') "
+                "WHERE user_id = ?",
+                (new_attempts, user_row["user_id"]),
+            )
+        else:
+            execute_write(
+                "UPDATE users SET failed_login_attempts = ? WHERE user_id = ?",
+                (new_attempts, user_row["user_id"]),
+            )
+
+        logger.warning(
+            "Login failed: wrong password for username '%s' (attempt %s/%s%s).",
+            username, new_attempts, config.MAX_FAILED_LOGIN_ATTEMPTS,
+            ", now locked" if just_got_locked else "",
+        )
+        _record_auth_audit_event(
+            user_row["user_id"], "login_failed",
+            reason="locked_out" if just_got_locked else "wrong_password",
+        )
         raise AuthenticationError(generic_error)
 
     execute_write(
-        "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = ?",
+        "UPDATE users SET last_login = CURRENT_TIMESTAMP, "
+        "failed_login_attempts = 0, locked_until = NULL WHERE user_id = ?",
         (user_row["user_id"],),
     )
+    _record_auth_audit_event(user_row["user_id"], "login_success")
 
     logger.info("User '%s' authenticated successfully.", username)
 
@@ -804,6 +904,7 @@ def authenticate_with_google(google_email: str, expected_role: str | None = None
         raise AuthenticationError("This account has been deactivated. Contact an administrator.")
 
     execute_write("UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = ?", (existing["user_id"],))
+    _record_auth_audit_event(existing["user_id"], "login_success", reason="google")
     logger.info("User '%s' authenticated via Google Sign-In.", existing["username"])
 
     return {
@@ -1345,6 +1446,7 @@ def logout() -> None:
     user = st.session_state.get(SESSION_KEY_USER)
     if user is not None:
         logger.info("User '%s' logged out.", user["username"])
+        _record_auth_audit_event(user["user_id"], "logout")
 
     st.session_state.pop(SESSION_KEY_USER, None)
     st.session_state.pop(SESSION_KEY_LAST_ACTIVITY, None)
